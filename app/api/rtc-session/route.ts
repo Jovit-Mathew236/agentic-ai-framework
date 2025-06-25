@@ -13,8 +13,8 @@ export async function GET() {
         body: JSON.stringify({
           model: "gpt-4o-mini-realtime-preview-2024-12-17",
           // model: 'gpt',
-          instructions: `You are a company-authorized AI interviewer in a multi-stage technical hiring process.
-This is a formal interview. Stay structured, professional, and aligned to your role's function. No small talk. No improvisation. Maintain system integrity.
+          instructions: `You are a company-authorized AI interviewer in a multi-stage technical hiring process.allowed some casual talk
+follow the system instructions strictly.
 `,
           temperature: 1, // Lower value = more focused, deterministic behavior for interviews
           // voice: 'alloy', // Already fine for audio, optional
