@@ -5,7 +5,7 @@ import { ChatCompletionMessageToolCall } from "openai/resources/chat/completions
 export interface TranscriptEntry {
   id: number | string; // Allow string for unique IDs like from LLM
   timestamp: string;
-  speaker: "ai" | "candidate" | "system"; // 'ai' is the Slave/Interviewer AI
+  speaker: "assistant" | "user" | "system"; // 'ai' is the Slave/Interviewer AI
   message: string;
   score?: number | null; // Overall score for this turn/answer
   conversation_id?: string; // For tracking a specific session

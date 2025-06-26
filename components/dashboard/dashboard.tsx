@@ -3,9 +3,10 @@
 import React, { useState, useEffect, useRef, useCallback } from "react";
 import { Brain } from "lucide-react";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
-import { v4 as uuidv4 } from "uuid";
 // Import types and utilities
 import type { TranscriptEntry, SystemMessageEntry } from "@/lib/interview";
+// Import ServerEvent from centralized types
+import { ServerEvent } from "@/types/tools";
 
 // Import WebRTC utilities
 import {
@@ -89,7 +90,7 @@ const InterviewDashboard: React.FC = () => {
 
   // Buffer configuration - REDUCED for more frequent sending
   const BUFFER_TIMEOUT = 5000; // Send to master every 5 seconds
-  const MAX_BUFFER_SIZE = 2; // Or when buffer reaches 2 messages (1 user + 1 assistant)
+  // const MAX_BUFFER_SIZE = 2; // Or when buffer reaches 2 messages (1 user + 1 assistant)
 
   const isAudioPlaybackEnabled = true;
 
@@ -97,18 +98,17 @@ const InterviewDashboard: React.FC = () => {
   const simulateConversationEventRef =
     useRef<
       (
-        speaker: "ai" | "candidate",
+        speaker: "assistant" | "user",
         message: string,
         score?: number | null
       ) => Promise<void>
     >(null);
   const sendToMasterAIRef = useRef<(message: string) => Promise<void>>(null);
-  const handleRtcMessageRef =
-    useRef<(data: Record<string, unknown>) => void>(null);
+  const handleRtcMessageRef = useRef<(data: ServerEvent) => void>(null);
 
   // Mock logClientEvent and logServerEvent
   const logClientEvent = useCallback(
-    (data: unknown, eventName: string) => {
+    (data: ServerEvent, eventName: string) => {
       console.log(`[CLIENT EVENT: ${eventName}]`, data);
       const systemMessage: SystemMessageEntry = {
         id: Date.now() + Math.random(),
@@ -149,7 +149,7 @@ const InterviewDashboard: React.FC = () => {
 
   // FIXED: Add message to conversation buffer with proper pairing
   const addToConversationBuffer = useCallback(
-    (role: "user" | "assistant", content: string, eventType?: string) => {
+    (role: "user" | "assistant", content: string) => {
       // Skip very short or repetitive messages
       if (content.length < 3) {
         console.log("Skipping very short message:", content);
@@ -179,14 +179,12 @@ const InterviewDashboard: React.FC = () => {
           role: "user",
           content: buffer.pendingUserMessage,
           timestamp: Date.now() - 1000, // Slightly earlier timestamp for user
-          eventType: "user_message",
         });
 
         buffer.messages.push({
           role: "assistant",
           content: buffer.pendingAssistantMessage,
           timestamp: Date.now(),
-          eventType: "assistant_message",
         });
 
         // Clear pending messages
@@ -205,6 +203,7 @@ const InterviewDashboard: React.FC = () => {
   );
 
   // FIXED: Flush conversation buffer to master AI and handle interventions
+  // FIXED: Flush conversation buffer to master AI with proper RTC state checking
   const flushConversationBuffer = useCallback(async () => {
     const buffer = conversationBufferRef.current;
     if (buffer.messages.length === 0) {
@@ -244,61 +243,76 @@ const InterviewDashboard: React.FC = () => {
             `[BUFFER] Master AI intervention: ${data.masterAISystemMessage}`
           );
 
-          // Send system message to slave AI via WebRTC
-          // const id = uuidv4().slice(0, 32);
-          const systemMessagePayload = {
-            type: "conversation.item.create",
-            item: {
-              // id: id,
-              type: "message",
-              role: "system",
-              content: [
-                {
-                  type: "input_text",
-                  text: data.masterAISystemMessage,
-                },
-              ],
-            },
-          };
+          // Check RTC data channel state properly and implement fallback
+          let sentVia = "";
 
-          if (connectionState === "connected" && dcRef.current) {
+          if (
+            connectionState === "connected" &&
+            dcRef.current &&
+            dcRef.current.readyState === "open"
+          ) {
+            // Use response.create for system instructions (correct OpenAI Realtime API format)
+            const systemMessagePayload = {
+              type: "conversation.item.create",
+              item: {
+                // id: id,
+                type: "message",
+                role: "system",
+                content: [
+                  {
+                    type: "input_text",
+                    text: data.masterAISystemMessage,
+                  },
+                ],
+              },
+            };
+
             const sent = sendMessageOnDataChannel(
               dcRef.current,
               systemMessagePayload
             );
+
             if (sent) {
+              sentVia = "RTC";
               console.log(
-                "System instruction sent to Slave AI:",
+                "System instruction sent to Slave AI via RTC:",
                 systemMessagePayload
               );
             } else {
-              console.warn("Failed to send system instruction to Slave AI.");
+              console.warn(
+                "RTC send failed despite channel being open, falling back to HTTP."
+              );
             }
-          }
-          let sentVia = "";
-
-          if (connectionState === "connected" && dcRef.current) {
-            const sent = sendMessageOnDataChannel(
-              dcRef.current,
-              systemMessagePayload
+          } else {
+            console.warn(
+              `RTC not available for system message. State: ${connectionState}, Channel: ${
+                dcRef.current?.readyState || "null"
+              }. Falling back to HTTP.`
             );
-            if (sent) sentVia = "RTC";
-            else
-              console.warn("RTC send failed for system message, trying HTTP.");
           }
 
           if (sentVia !== "RTC") {
-            sendToMasterAIRef.current?.(
-              `System Message (via HTTP): ${data.masterAISystemMessage}`
+            // Master AI intervention detected, but RTC is unavailable.
+            // The frontend cannot send this to Slave AI via RTC. The backend (Master AI) is not configured
+            // to send these specific intervention messages to Slave AI via HTTP.
+            // We will only log this limitation and update the UI.
+            console.warn(
+              "Master AI intervention detected, but RTC channel unavailable for Slave AI delivery."
             );
-            sentVia = "HTTP";
+            sentVia = "FAILED_RTC_DELIVERY"; // Indicate failed RTC delivery
           }
+
+          setMasterAIResponse(
+            `Master AI Intervention (${sentVia}): ${data.masterAISystemMessage}`
+          );
+
+          // Add system message to UI
           const uiMessage: SystemMessageEntry = {
             id: Date.now(),
             timestamp: new Date().toLocaleTimeString(),
             role: "system",
-            content: `Sent (${sentVia}): ${data.masterAISystemMessage}`,
-            toolUsed: `manual_injection_${sentVia.toLowerCase()}`,
+            content: `Master AI (${sentVia}): ${data.masterAISystemMessage}`,
+            toolUsed: "master_ai_orchestration",
           };
           store.setSystemMessages((prev) => [...prev, uiMessage]);
         } else {
@@ -355,7 +369,7 @@ const InterviewDashboard: React.FC = () => {
   // Simulate sending conversation events
   const simulateConversationEvent = useCallback(
     async (
-      speaker: "ai" | "candidate",
+      speaker: "assistant" | "user",
       message: string,
       score: number | null = null
     ): Promise<void> => {
@@ -370,15 +384,14 @@ const InterviewDashboard: React.FC = () => {
 
       // Add to conversation buffer for master AI analysis
       addToConversationBuffer(
-        speaker === "candidate" ? "user" : "assistant",
-        message,
-        `simulated_${speaker}_message`
+        speaker === "user" ? "user" : "assistant",
+        message
       );
 
-      if (speaker === "candidate") {
+      if (speaker === "user") {
         if (connectionState === "connected" && dcRef.current) {
           const messageId = crypto.randomUUID();
-          const rtcMessage = {
+          const rtcMessage: ServerEvent = {
             type: "conversation.item.create",
             item: {
               id: messageId,
@@ -446,7 +459,7 @@ const InterviewDashboard: React.FC = () => {
 
   // FIXED: Enhanced RTC message handler with proper user message capture
   const handleRtcMessage = useCallback(
-    (data: Record<string, unknown>) => {
+    (data: ServerEvent) => {
       try {
         console.log("Received via Data Channel:", data);
 
@@ -457,13 +470,9 @@ const InterviewDashboard: React.FC = () => {
           const transcript = data.transcript as string;
           if (transcript && transcript.trim()) {
             console.log("[RTC] User speech transcribed:", transcript);
-            simulateConversationEventRef.current?.("candidate", transcript);
+            simulateConversationEventRef.current?.("user", transcript);
             // Add user input to buffer
-            addToConversationBuffer(
-              "user",
-              transcript,
-              "input_audio_transcription"
-            );
+            addToConversationBuffer("user", transcript);
           }
         }
 
@@ -502,15 +511,8 @@ const InterviewDashboard: React.FC = () => {
             );
             if (textContent && textContent.text) {
               console.log("[RTC] User text message:", textContent.text);
-              simulateConversationEventRef.current?.(
-                "candidate",
-                textContent.text
-              );
-              addToConversationBuffer(
-                "user",
-                textContent.text,
-                "conversation_item_created"
-              );
+              simulateConversationEventRef.current?.("user", textContent.text);
+              addToConversationBuffer("user", textContent.text);
             }
           }
         }
@@ -538,12 +540,8 @@ const InterviewDashboard: React.FC = () => {
 
             if (message && message.trim()) {
               console.log("[RTC] Assistant message completed:", message);
-              simulateConversationEventRef.current?.("ai", message);
-              addToConversationBuffer(
-                "assistant",
-                message,
-                "conversation_item_completed"
-              );
+              simulateConversationEventRef.current?.("assistant", message);
+              addToConversationBuffer("assistant", message);
             }
           }
         }
@@ -556,12 +554,8 @@ const InterviewDashboard: React.FC = () => {
               "[RTC] Assistant audio transcript completed:",
               transcript
             );
-            simulateConversationEventRef.current?.("ai", transcript);
-            addToConversationBuffer(
-              "assistant",
-              transcript,
-              "audio_transcript_done"
-            );
+            simulateConversationEventRef.current?.("assistant", transcript);
+            addToConversationBuffer("assistant", transcript);
           }
         }
 
@@ -578,7 +572,7 @@ const InterviewDashboard: React.FC = () => {
             timestamp: new Date().toLocaleTimeString(),
             role: "system",
             content: data.content,
-            toolUsed: (data.toolUsed as string) || "rtc_event",
+            toolUsed: data.toolUsed || "rtc_event",
           };
           store.setSystemMessages((prev) => [...prev, systemMessage]);
         }
@@ -602,7 +596,7 @@ const InterviewDashboard: React.FC = () => {
   const fetchEphemeralKey = useCallback(async (): Promise<string | null> => {
     try {
       logClientEvent(
-        { url: "/api/rtc-session" },
+        { url: "/api/rtc-session", type: "request" },
         "fetch_ephemeral_key_request"
       );
       const tokenResponse = await fetch("/api/rtc-session");
@@ -619,7 +613,7 @@ const InterviewDashboard: React.FC = () => {
     } catch (error) {
       console.error("Error fetching ephemeral key:", error);
       logClientEvent(
-        { error: (error as Error).message },
+        { error: (error as Error).message, type: "error" },
         "error.fetch_ephemeral_key"
       );
       setConnectionState("failed");
@@ -665,12 +659,12 @@ const InterviewDashboard: React.FC = () => {
       };
 
       dc.addEventListener("open", () => {
-        logClientEvent({}, "data_channel.open");
+        logClientEvent({ type: "data_channel_event" }, "data_channel.open");
         setConnectionState("connected");
         console.log("RTC Data Channel Opened");
       });
       dc.addEventListener("close", () => {
-        logClientEvent({}, "data_channel.close");
+        logClientEvent({ type: "data_channel_event" }, "data_channel.close");
         console.log("Data channel closed.");
         setConnectionState("disconnected");
         disconnectRTCSession(pcRef.current, dcRef.current);
@@ -680,7 +674,7 @@ const InterviewDashboard: React.FC = () => {
       dc.addEventListener("error", (err: Event) => {
         const errorEvent = err as RTCErrorEvent;
         logClientEvent(
-          { error: errorEvent?.error?.message || String(err) },
+          { error: errorEvent?.error?.message || String(err), type: "error" },
           "data_channel.error"
         );
         console.error("Data channel error:", err);
@@ -706,7 +700,7 @@ const InterviewDashboard: React.FC = () => {
     } catch (err) {
       console.error("Error connecting to realtime:", err);
       logClientEvent(
-        { error: (err as Error).message },
+        { error: (err as Error).message, type: "error" },
         "error.connect_to_realtime"
       );
       setConnectionState("failed");
@@ -776,15 +770,15 @@ const InterviewDashboard: React.FC = () => {
 
     // Add a concluding message
     simulateConversationEventRef.current?.(
-      "ai",
+      "assistant",
       "Thank you. The interview has concluded."
     );
   };
 
   // Manual system message injection
-  const injectSystemMessage = useCallback(() => {
+  const injectSystemMessage = useCallback(async () => {
     if (!customSystemMessage.trim()) return;
-    const systemMessagePayload = {
+    const systemMessagePayload: ServerEvent = {
       type: "conversation.item.create",
       item: {
         type: "message",
@@ -799,31 +793,94 @@ const InterviewDashboard: React.FC = () => {
     };
     let sentVia = "";
 
-    if (connectionState === "connected" && dcRef.current) {
+    if (
+      connectionState === "connected" &&
+      dcRef.current &&
+      dcRef.current.readyState === "open"
+    ) {
       const sent = sendMessageOnDataChannel(
         dcRef.current,
         systemMessagePayload
       );
-      if (sent) sentVia = "RTC";
-      else console.warn("RTC send failed for system message, trying HTTP.");
+      if (sent) {
+        sentVia = "RTC";
+        console.log(
+          "Manual system message sent via RTC:",
+          systemMessagePayload
+        );
+      } else {
+        console.warn("RTC send failed for manual system message, trying HTTP.");
+      }
+    } else {
+      console.warn(
+        "RTC is not open, falling back to HTTP for manual system message."
+      );
     }
 
     if (sentVia !== "RTC") {
-      sendToMasterAIRef.current?.(
-        `System Message (via HTTP): ${customSystemMessage}`
-      );
-      sentVia = "HTTP";
+      try {
+        // Fallback to HTTP by sending to Master AI backend for forwarding
+        const response = await fetch("/api/interview-event", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            sessionId: rtcSessionId || `client-${crypto.randomUUID()}`,
+            type: "system_message_injection",
+            customSystemMessageContent: customSystemMessage,
+          }),
+        });
+
+        if (response.ok) {
+          const data = await response.json();
+          console.log(
+            "[Manual System Message] Backend injection request successful:",
+            data
+          );
+          if (data.masterAISystemMessage) {
+            setMasterAIResponse(data.masterAISystemMessage); // Use the masterAISystemMessage directly from the backend
+            if (data.masterAISystemMessage.includes("Forwarded via HTTP")) {
+              sentVia = "HTTP_TO_BACKEND"; // Indicate it went via HTTP to backend
+            } else {
+              sentVia = "FAILED_HTTP_REQUEST"; // Mark if frontend request to backend failed
+            }
+          }
+        } else {
+          console.error(
+            "[Manual System Message] Backend injection request failed:",
+            response.status
+          );
+          setMasterAIResponse(
+            `Error requesting backend injection: ${response.statusText}`
+          );
+          sentVia = "FAILED_HTTP_REQUEST";
+        }
+      } catch (error) {
+        console.error(
+          "[Manual System Message] Error during backend injection request:",
+          error
+        );
+        setMasterAIResponse(
+          `Error during backend injection request: ${(error as Error).message}`
+        );
+        sentVia = "FAILED_HTTP_REQUEST";
+      }
     }
+
     const uiMessage: SystemMessageEntry = {
       id: Date.now(),
       timestamp: new Date().toLocaleTimeString(),
       role: "system",
-      content: `Sent (${sentVia}): ${customSystemMessage}`,
-      toolUsed: `manual_injection_${sentVia.toLowerCase()}`,
+      content: `Manual Injection: "${customSystemMessage}" (Frontend send: ${sentVia})`,
+      toolUsed: `manual_injection`,
     };
     store.setSystemMessages((prev) => [...prev, uiMessage]);
     setCustomSystemMessage("");
-  }, [customSystemMessage, connectionState, store.setSystemMessages]);
+  }, [
+    customSystemMessage,
+    connectionState,
+    rtcSessionId,
+    store.setSystemMessages,
+  ]);
 
   const simulateCandidateResponse = useCallback(() => {
     const responses = [
@@ -837,7 +894,7 @@ const InterviewDashboard: React.FC = () => {
     ];
     const randomResponse =
       responses[Math.floor(Math.random() * responses.length)];
-    simulateConversationEventRef.current?.("candidate", randomResponse);
+    simulateConversationEventRef.current?.("user", randomResponse);
   }, [simulateConversationEventRef]);
 
   // Manual buffer flush for testing

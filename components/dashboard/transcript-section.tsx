@@ -47,19 +47,21 @@ const TranscriptSection = (props: Props) => {
               <div
                 key={entry.id || index}
                 className={`flex flex-col p-3 rounded-lg shadow-sm ${
-                  entry.speaker === "candidate"
+                  entry.speaker === "user"
                     ? "bg-blue-500/10 border-blue-500/20 items-end ml-6 dark:bg-blue-500/20 dark:border-blue-500/30"
                     : "bg-slate-500/10 border-slate-500/20 items-start mr-6 dark:bg-slate-700/30 dark:border-slate-600"
                 }`}
               >
                 <div className="flex items-center gap-2 mb-1 w-full">
-                  {entry.speaker === "candidate" ? (
+                  {entry.speaker === "user" ? (
                     <User className="w-4 h-4 text-blue-600 dark:text-blue-400" />
                   ) : (
                     <Bot className="w-4 h-4 text-slate-600 dark:text-slate-400" />
                   )}
                   <span className="text-xs font-semibold uppercase tracking-wider text-slate-700 dark:text-slate-300">
-                    {entry.speaker === "ai" ? "AI Interviewer" : "Candidate"}
+                    {entry.speaker === "assistant"
+                      ? "AI Interviewer"
+                      : "Candidate"}
                   </span>
                   <span className="text-xs text-slate-500 dark:text-slate-400 ml-auto">
                     {entry.timestamp}
@@ -67,7 +69,7 @@ const TranscriptSection = (props: Props) => {
                 </div>
                 <p
                   className={`text-sm ${
-                    entry.speaker === "candidate"
+                    entry.speaker === "user"
                       ? "text-blue-800 dark:text-blue-200 text-right"
                       : "text-slate-800 dark:text-slate-200"
                   }`}

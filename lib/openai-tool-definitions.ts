@@ -13,9 +13,9 @@ export const openAITools: OpenAIToolDefinition[] = [
         properties: {
           animal: {
             type: "string",
-            enum: ["cat", "dog", "none"],
+            enum: ["cat", "dog", "dinosaur", "none"],
             description:
-              "The specific animal mentioned: 'cat' if cats/felines mentioned, 'dog' if dogs/canines mentioned, 'none' if no animals mentioned",
+              "The specific animal mentioned: 'cat' if cats/felines mentioned, 'dog' if dogs/canines mentioned, 'dinosaur' if dinosaurs mentioned, 'none' if no animals mentioned",
           },
         },
         required: ["animal"],

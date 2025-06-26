@@ -64,3 +64,30 @@ export interface ToolFunctions {
     suggestions: string[];
   }>;
 }
+
+export interface ServerEvent {
+  type: string;
+  content?: string; // For system_event
+  toolUsed?: string; // For system_event
+  transcript?: string; // For audio transcription events
+  item?: {
+    id?: string;
+    type?: string;
+    role?: string;
+    content?: Array<{
+      type: string;
+      text?: string;
+      transcript?: string;
+      audio?: unknown;
+    }>;
+  };
+  response?: {
+    instructions?: string;
+    input?: unknown[];
+  };
+  masterAISystemMessage?: string;
+  sessionId?: string;
+  url?: string;
+  error?: string;
+  [key: string]: unknown; // Index signature for flexibility
+}
