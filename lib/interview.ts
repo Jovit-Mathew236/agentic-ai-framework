@@ -43,7 +43,7 @@ export interface ToolFunctionResponsePayload {
 
 // --- New Tool Definition for detectAnimal ---
 export interface DetectAnimalArgs {
-  animal: "cat" | "dog" | "none";
+  animal: "cat" | "dinosaur" | "none";
 }
 
 // --- Backend Tool Functions (only detectAnimal) ---

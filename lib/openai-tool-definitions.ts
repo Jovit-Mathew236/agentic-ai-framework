@@ -1,19 +1,21 @@
-// src/lib/openai-tool-definitions.ts
-import type { OpenAIToolDefinition } from "@/lib/interview";
+import { OpenAIToolDefinition } from "./interview";
 
+// src/lib/openai-tool-definitions.ts
 export const openAITools: OpenAIToolDefinition[] = [
   {
     type: "function",
     function: {
       name: "detectAnimal",
-      description: "Detects if user is talking about cats or dogs",
+      description:
+        "REQUIRED: Call this function whenever cats, dogs, or any animals are mentioned in the conversation. This function must be called for any animal-related content.",
       parameters: {
         type: "object",
         properties: {
           animal: {
             type: "string",
             enum: ["cat", "dog", "none"],
-            description: "Animal detected in user message",
+            description:
+              "The specific animal mentioned: 'cat' if cats/felines mentioned, 'dog' if dogs/canines mentioned, 'none' if no animals mentioned",
           },
         },
         required: ["animal"],

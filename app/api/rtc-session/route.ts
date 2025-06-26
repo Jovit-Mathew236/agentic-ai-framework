@@ -15,6 +15,8 @@ export async function GET() {
           // model: 'gpt',
           instructions: `You are a company-authorized AI interviewer in a multi-stage technical hiring process.allowed some casual talk
 follow the system instructions strictly.
+### ONLY TALK IN ENGLISH
+### DO NOT USE ANY OTHER LANGUAGE
 `,
           temperature: 1, // Lower value = more focused, deterministic behavior for interviews
           // voice: 'alloy', // Already fine for audio, optional
@@ -27,6 +29,7 @@ follow the system instructions strictly.
             create_response: true,
             interrupt_response: false,
           },
+          input_audio_transcription: { model: "whisper-1" },
           // input_audio_noise_reduction: {
           //   type: 'far_field'
           // }

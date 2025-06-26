@@ -19,186 +19,189 @@ const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
 });
 
-// --- Orchestrator AI Configuration (GPT-4.1 Turbo) ---
-const ORCHESTRATOR_MODEL = "gpt-3.5-turbo"; // Changed from gpt-4-0125-preview
-const ORCHESTRATOR_SYSTEM_PROMPT = `You are an orchestrator. Detect if user mentions cats or dogs. Then call detectAnimal. Based on the output, return only a system message to guide the assistant to ask about the other animal.`;
+// --- Master AI Configuration ---
+const MASTER_MODEL = "gpt-4.1-nano-2025-04-14";
+const MASTER_SYSTEM_PROMPT = `You are a silent interview monitor. Your job is to:
+1. Analyze conversation exchanges between interviewer and candidate
+2. ALWAYS call detectAnimal function when you see mentions of: cats, dogs, or any animals
+3. Look for keywords like "cat", "cats", "dog", "dogs", "pet", "pets" in the conversation
+4. Based on detection results, provide specific instructions to guide the interviewer
+5. If no animals are mentioned, respond with "No intervention needed."
+6. Keep responses concise and focused on interview flow management
 
-// --- Slave AI Configuration (o4-mini) ---
-const SLAVE_MODEL = "gpt-3.5-turbo"; // Changed from openai/gpt-4o-mini
+IMPORTANT: When you see animal-related words, you MUST call the detectAnimal function.`;
 
 export async function POST(req: NextRequest) {
-  const { sessionId, userMessageContent } = await req.json();
-
-  if (!sessionId || !userMessageContent) {
-    return NextResponse.json(
-      { error: "Session ID and user message are required." },
-      { status: 400 }
-    );
-  }
-
-  let masterAIContext = getMasterAIContext(sessionId);
-
-  if (!masterAIContext) {
-    masterAIContext = initializeSession(sessionId);
-  }
-
-  // Add user message to conversation history for both AIs
-  masterAIContext.conversationHistory.push({
-    id: Date.now(),
-    timestamp: new Date().toISOString(),
-    speaker: "candidate",
-    message: userMessageContent,
-  });
-
-  // --- Step 1: Orchestrator AI (GPT-4.1 Turbo) decides on tool calls ---
-  console.log("[Route] Calling Orchestrator AI...");
-
-  const orchestratorMessages: ChatCompletionMessageParam[] = [
-    { role: "system", content: ORCHESTRATOR_SYSTEM_PROMPT },
-    { role: "user", content: userMessageContent },
-  ];
-
   try {
-    const orchestratorResponse = await openai.chat.completions.create({
-      model: ORCHESTRATOR_MODEL,
-      messages: orchestratorMessages,
-      tools: openAITools,
-      tool_choice: "auto",
-    });
+    const { sessionId, conversationBatch, type } = await req.json();
 
-    const orchestratorResponseChoice = orchestratorResponse.choices[0];
-    const orchestratorMessage: ChatCompletionMessage =
-      orchestratorResponseChoice.message;
-
-    // --- Step 2: Handle tool calls from Orchestrator AI ---
-    if (
-      orchestratorMessage.tool_calls &&
-      orchestratorMessage.tool_calls.length > 0
-    ) {
-      console.log("[Route] Orchestrator AI made tool calls.");
-      for (const toolCall of orchestratorMessage.tool_calls) {
-        const functionName = toolCall.function.name;
-        const functionArgs = JSON.parse(toolCall.function.arguments);
-
-        if (functionName === "detectAnimal") {
-          console.log(`[Route] Executing tool: ${functionName}`);
-
-          const toolResult = await detectAnimal(
-            functionArgs,
-            masterAIContext,
-            sessionId
-          );
-
-          // Add tool output to orchestrator's conversation history for context
-          orchestratorMessages.push({
-            tool_call_id: toolCall.id,
-            role: "tool",
-            content: JSON.stringify(toolResult.data || toolResult.error),
-          });
-
-          // --- Step 3: Get Orchestrator AI's final system message based on tool result ---
-          console.log("[Route] Getting Orchestrator AI's final response...");
-          const finalOrchestratorResponse =
-            await openai.chat.completions.create({
-              model: ORCHESTRATOR_MODEL,
-              messages: orchestratorMessages,
-            });
-
-          const finalOrchestratorMessage: ChatCompletionMessage =
-            finalOrchestratorResponse.choices[0].message;
-
-          // The orchestrator is designed to return a system message. Directly use its content.
-          const systemMessageContent = finalOrchestratorMessage.content || "";
-
-          if ((finalOrchestratorMessage.role as string) !== "system") {
-            console.warn(
-              `[Route] Orchestrator AI returned unexpected role: ${finalOrchestratorMessage.role}. Using content as system message anyway.`
-            );
-          }
-          console.log(
-            `[Route] Orchestrator AI system message: ${systemMessageContent}`
-          );
-          updateMasterAIContext(sessionId, {
-            masterAISystemMessage: systemMessageContent,
-          });
-        }
-      }
-    } else if (orchestratorMessage.content) {
-      // If no tool calls, but orchestrator has a direct message, use it as system message
-      console.log(
-        `[Route] Orchestrator AI direct message: ${orchestratorMessage.content}`
+    if (!sessionId) {
+      return NextResponse.json(
+        { error: "Session ID is required." },
+        { status: 400 }
       );
-      updateMasterAIContext(sessionId, {
-        masterAISystemMessage: orchestratorMessage.content || "",
-      });
     }
-  } catch (error) {
-    console.error("Error during Orchestrator AI processing:", error);
-    return NextResponse.json(
-      { error: "Failed to process Orchestrator AI response." },
-      { status: 500 }
-    );
-  }
 
-  // --- Step 4: Slave AI (o4-mini) generates response using updated context ---
-  console.log("[Route] Calling Slave AI...");
+    let masterAIContext = getMasterAIContext(sessionId);
+    if (!masterAIContext) {
+      masterAIContext = initializeSession(sessionId);
+    }
 
-  masterAIContext = getMasterAIContext(sessionId); // Get updated context
+    // Handle batch conversation processing (MAIN FLOW)
+    if (type === "conversation_batch" && conversationBatch) {
+      console.log("[Master AI] Processing conversation batch...");
 
-  const slaveAIMessages: ChatCompletionMessageParam[] = [
-    {
-      role: "system",
-      content:
-        masterAIContext.masterAISystemMessage || "You are a helpful assistant.",
-    },
-    // Add previous conversation history from masterAIContext
-    ...masterAIContext.conversationHistory.map((entry) => {
-      let role: "user" | "assistant" | "system";
-      if (entry.speaker === "candidate") {
-        role = "user";
-      } else if (entry.speaker === "ai") {
-        role = "assistant";
-      } else {
-        role = "system";
+      // Add all messages from batch to conversation history
+      conversationBatch.forEach((msg: any) => {
+        masterAIContext.conversationHistory.push({
+          id: Date.now() + Math.random(),
+          timestamp: new Date().toISOString(),
+          speaker: msg.role === "user" ? "candidate" : "ai",
+          message: msg.content,
+        });
+      });
+
+      // Analyze the conversation batch
+      const recentConversation = conversationBatch
+        .map((msg: any) => `${msg.role}: ${msg.content}`)
+        .join("\n");
+
+      console.log("[Master AI] Analyzing conversation:", recentConversation);
+
+      // Prepare messages for OpenAI API
+      const masterMessages: ChatCompletionMessageParam[] = [
+        {
+          role: "system",
+          content: MASTER_SYSTEM_PROMPT,
+        },
+        // Add previous conversation history if available (optional, but good for context)
+        ...masterAIContext.conversationHistory.slice(-5).map((entry) => ({
+          role: entry.speaker === "candidate" ? "user" : "assistant",
+          content: entry.message,
+        })),
+        // Current exchange
+        {
+          role: "user",
+          content: `Analyze this conversation exchange and determine if intervention is needed:\n\n${recentConversation}`,
+        },
+      ];
+
+      let finalSystemInstruction = "No intervention needed."; // Default
+      let toolArgs: any = {}; // To store arguments if a tool is called
+
+      try {
+        const masterResponse = await openai.chat.completions.create({
+          model: MASTER_MODEL,
+          messages: masterMessages,
+          tools: openAITools,
+          tool_choice: "auto",
+        });
+
+        const masterMessage = masterResponse.choices[0].message;
+
+        // Handle tool calls if present
+        if (masterMessage.tool_calls && masterMessage.tool_calls.length > 0) {
+          console.log("[Master AI] Tool calls detected");
+
+          // Add the assistant message with tool calls to the conversation
+          masterMessages.push({
+            role: "assistant",
+            content: masterMessage.content, // This might be null if only tool_calls are present
+            tool_calls: masterMessage.tool_calls,
+          });
+
+          // Process each tool call
+          for (const toolCall of masterMessage.tool_calls) {
+            const functionName = toolCall.function.name;
+            const functionArgs = JSON.parse(toolCall.function.arguments);
+            toolArgs = functionArgs; // Store args for later
+
+            if (functionName === "detectAnimal") {
+              console.log(
+                `[Master AI] Executing tool: ${functionName} with args:`,
+                functionArgs
+              );
+
+              const toolResult = await detectAnimal(
+                functionArgs,
+                masterAIContext,
+                sessionId
+              );
+
+              // Add tool response to the conversation
+              masterMessages.push({
+                role: "tool",
+                tool_call_id: toolCall.id,
+                content: JSON.stringify(toolResult.data || toolResult.error),
+              });
+            }
+          }
+
+          // Get final response from master after tool execution
+          console.log("[Master AI] Getting final intervention decision...");
+          const finalMasterResponse = await openai.chat.completions.create({
+            model: MASTER_MODEL,
+            messages: masterMessages, // Now includes tool results
+          });
+
+          const finalMessage = finalMasterResponse.choices[0].message;
+
+          if (finalMessage.content) {
+            console.log(`[Master AI] Final decision: ${finalMessage.content}`);
+            finalSystemInstruction = finalMessage.content; // This is the instruction for the interviewer
+          } else {
+            // If no content but tool was called, construct a basic instruction
+            if (toolArgs.animal === "cat") {
+              finalSystemInstruction =
+                "The candidate mentioned cats. Ask them about their experience with dinosaurs or pets in general.";
+            } else if (toolArgs.animal === "dinosaur") {
+              finalSystemInstruction =
+                "The candidate mentioned dinosaurs. Ask them about their experience with cats or other pets.";
+            } else {
+              finalSystemInstruction = "No intervention needed.";
+            }
+          }
+        } else if (masterMessage.content) {
+          // No tool calls, use direct response
+          console.log(`[Master AI] Direct response: ${masterMessage.content}`);
+          finalSystemInstruction = masterMessage.content;
+        }
+
+        // Update the context with the determined system instruction
+        updateMasterAIContext(sessionId, {
+          masterAISystemMessage: finalSystemInstruction,
+        });
+
+        // Important: Return the system instruction in the response
+        return NextResponse.json({
+          masterAISystemMessage: finalSystemInstruction,
+          sessionId: sessionId,
+        });
+      } catch (error) {
+        console.error("Error processing conversation batch:", error);
+        // Update context with an error message if processing fails
+        updateMasterAIContext(sessionId, {
+          masterAISystemMessage: `Error processing conversation: ${
+            (error as Error).message
+          }`,
+        });
+        return NextResponse.json(
+          { error: "Failed to process conversation batch." },
+          { status: 500 }
+        );
       }
-      return { role, content: entry.message };
-    }),
-  ];
-
-  try {
-    const slaveAIResponse = await openai.chat.completions.create({
-      model: SLAVE_MODEL,
-      messages: slaveAIMessages,
-      // Stream: true if you want to stream the response
-    });
-
-    const assistantResponseContent = slaveAIResponse.choices[0].message.content;
-
-    if (assistantResponseContent) {
-      // Add Slave AI's response to conversation history
-      masterAIContext.conversationHistory.push({
-        id: Date.now() + 1,
-        timestamp: new Date().toISOString(),
-        speaker: "ai",
-        message: assistantResponseContent,
-      });
-
-      updateMasterAIContext(sessionId, { ...masterAIContext }); // Save updated history
-
-      return NextResponse.json({
-        response: assistantResponseContent,
-        masterAISystemMessage: masterAIContext.masterAISystemMessage,
-      });
     }
+
+    // Default response for other request types
+    return NextResponse.json({
+      masterAISystemMessage: "No intervention needed.", // Default if no batch processing occurred
+      sessionId: sessionId,
+    });
   } catch (error) {
-    console.error("Error during Slave AI processing:", error);
+    console.error("Error in interview-event route:", error);
     return NextResponse.json(
-      { error: "Failed to get response from Slave AI." },
+      { error: "Internal server error" },
       { status: 500 }
     );
   }
-
-  return NextResponse.json({ response: "No response generated." });
 }
-
-// Removed: initializeInterview, interviewSessionStore, jobDataStore, and all other interview-related endpoints and logic.
