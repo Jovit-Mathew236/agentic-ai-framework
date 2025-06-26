@@ -30,7 +30,6 @@ import {
 } from "@/components/ui/select";
 // import { Input } from "../ui/input"; // Input component is not used directly
 import { Badge } from "@/components/ui/badge";
-import { ToolFunctions } from "@/lib/interview";
 
 // Enhanced interface for system message configuration
 interface SystemMessageConfig {
@@ -48,9 +47,6 @@ type Props = {
   stopInterview: () => void;
   simulateCandidateResponse: () => void;
   connectToRealtime: () => void;
-  callTool: () => void;
-  selectedTool: keyof ToolFunctions;
-  setSelectedTool: (tool: keyof ToolFunctions) => void;
   customSystemMessage: string;
   setCustomSystemMessage: (message: string) => void;
   injectSystemMessage: () => void;
@@ -451,70 +447,7 @@ const ControlPanel = (props: Props) => {
 
         <Separator className="dark:bg-slate-700" />
 
-        {/* Existing Tool Selection */}
-        <div className="space-y-3">
-          <label
-            htmlFor="tool-select"
-            className="block text-base font-semibold text-slate-700 dark:text-slate-200 mb-1"
-          >
-            Manual AI Tool Call
-          </label>
-          <div className="flex flex-col sm:flex-row gap-2">
-            <Select
-              value={props.selectedTool}
-              onValueChange={(value: keyof ToolFunctions) =>
-                props.setSelectedTool(value)
-              }
-            >
-              <SelectTrigger
-                id="tool-select"
-                className="flex-1 bg-white dark:bg-slate-800 dark:border-slate-700 focus:ring-indigo-500"
-              >
-                <SelectValue placeholder="Select a tool" />
-              </SelectTrigger>
-              <SelectContent className="dark:bg-slate-800 dark:border-slate-700">
-                <SelectItem
-                  value="getQuestion"
-                  className="dark:text-slate-200 dark:hover:bg-slate-700/70"
-                >
-                  getQuestion
-                </SelectItem>
-                <SelectItem
-                  value="evaluateAnswer"
-                  className="dark:text-slate-200 dark:hover:bg-slate-700/70"
-                >
-                  evaluateAnswer
-                </SelectItem>
-                <SelectItem
-                  value="updateInterviewState"
-                  className="dark:text-slate-200 dark:hover:bg-slate-700/70"
-                >
-                  updateInterviewState
-                </SelectItem>
-                <SelectItem
-                  value="analyzeBehavior"
-                  className="dark:text-slate-200 dark:hover:bg-slate-700/70"
-                >
-                  analyzeBehavior
-                </SelectItem>
-                <SelectItem
-                  value="assessTechnicalResponse"
-                  className="dark:text-slate-200 dark:hover:bg-slate-700/70"
-                >
-                  assessTechnicalResponse
-                </SelectItem>
-              </SelectContent>
-            </Select>
-            <Button
-              onClick={props.callTool}
-              variant="outline"
-              disabled={!props.store.isActive}
-              className="dark:border-slate-600 dark:text-slate-300 dark:hover:bg-slate-700/50"
-            >
-              <Zap className="w-4 h-4 mr-2" /> Execute Tool
-            </Button>
-          </div>
-        </div>
+        {/* Removed Existing Tool Selection */}
       </CardContent>
     </Card>
   );

@@ -5,12 +5,7 @@ import { Brain } from "lucide-react";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 
 // Import types and utilities (keeping original imports)
-import type {
-  Question,
-  TranscriptEntry,
-  SystemMessageEntry,
-  ToolFunctions,
-} from "@/lib/interview";
+import type { TranscriptEntry, SystemMessageEntry } from "@/lib/interview";
 
 // Import WebRTC utilities (keeping original imports)
 import {
@@ -35,29 +30,8 @@ const useInterviewStore = () => {
     []
   );
   const [currentScore, setCurrentScore] = useState<number>(0);
-  const [questionBank, setQuestionBank] = useState<Question[]>([
-    {
-      id: 1,
-      question: "Tell me about yourself",
-      category: "general",
-      difficulty: 1,
-    },
-    {
-      id: 2,
-      question: "What's your biggest strength?",
-      category: "behavioral",
-      difficulty: 2,
-    },
-    {
-      id: 3,
-      question: "Describe a challenging project",
-      category: "technical",
-      difficulty: 3,
-    },
-  ]);
-  const [currentQuestion, setCurrentQuestion] = useState<Question | undefined>(
-    undefined
-  );
+  const [questionBank, setQuestionBank] = useState<never[]>([]);
+  const [currentQuestion, setCurrentQuestion] = useState<undefined>(undefined);
 
   return {
     isActive,
@@ -80,8 +54,6 @@ const InterviewDashboard: React.FC = () => {
   const store = useInterviewStore();
   const [isRecording, setIsRecording] = useState<boolean>(false);
   const [customSystemMessage, setCustomSystemMessage] = useState<string>("");
-  const [selectedTool, setSelectedTool] =
-    useState<keyof ToolFunctions>("getQuestion");
   const [masterAIResponse, setMasterAIResponse] = useState<string>("");
 
   // WebRTC related state and refs (all original)
@@ -207,17 +179,14 @@ const InterviewDashboard: React.FC = () => {
 
   // Core: send message to Master AI (original implementation)
   const sendToMasterAI = useCallback(
-    async (message: string, toolRequestData?: ToolRequestData) => {
+    async (message: string) => {
       try {
         const response = await fetch("/api/interview-event", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             sessionId: rtcSessionId || `client-${crypto.randomUUID()}`,
-            message: message,
-            action: toolRequestData?.action || "continue",
-            toolResponseData: toolRequestData,
-            history: store.transcript,
+            userMessageContent: message,
           }),
         });
 
@@ -225,59 +194,18 @@ const InterviewDashboard: React.FC = () => {
           throw new Error(`HTTP error! status: ${response.status}`);
         const data = await response.json();
         if (data.sessionId && !rtcSessionId) setRtcSessionId(data.sessionId);
-        if (data.aiMessage)
-          simulateConversationEventRef.current?.("ai", data.aiMessage);
+        if (data.response)
+          simulateConversationEventRef.current?.("ai", data.response);
 
-        if (data.toolCalls && data.toolCalls.length > 0) {
-          data.toolCalls.forEach(
-            (toolCall: { function: { name: string; arguments: string } }) => {
-              const sysMsg: SystemMessageEntry = {
-                id: Date.now(),
-                timestamp: new Date().toLocaleTimeString(),
-                role: "system",
-                content: `Master AI tool: ${toolCall.function.name} args: ${toolCall.function.arguments}`,
-                toolUsed: toolCall.function.name,
-              };
-              store.setSystemMessages((prev) => [...prev, sysMsg]);
-              if (
-                toolCall.function.name === "getQuestion" &&
-                data.interviewState?.currentQuestion
-              ) {
-                store.setCurrentQuestion(
-                  data.interviewState.currentQuestion as Question
-                );
-              }
-            }
+        if (data.masterAISystemMessage) {
+          setMasterAIResponse(
+            `Orchestrator AI set system message: ${data.masterAISystemMessage}`
           );
+        } else if (data.response) {
+          setMasterAIResponse(`Slave AI responded.`);
+        } else {
+          setMasterAIResponse(`No specific AI action or response.`);
         }
-        if (data.toolCallResults && data.toolCallResults.length > 0) {
-          data.toolCallResults.forEach(
-            (result: {
-              tool_name: string;
-              result: Record<string, unknown>;
-            }) => {
-              const sysMsg: SystemMessageEntry = {
-                id: Date.now(),
-                timestamp: new Date().toLocaleTimeString(),
-                role: "system",
-                content: `Tool ${result.tool_name} returned: ${JSON.stringify(
-                  result.result
-                )}`,
-                toolUsed: result.tool_name,
-              };
-              store.setSystemMessages((prev) => [...prev, sysMsg]);
-            }
-          );
-        }
-        if (data.interviewState) {
-          store.setCurrentScore(data.interviewState.overallScore || 0);
-          if (data.interviewState.currentQuestion)
-            store.setCurrentQuestion(
-              data.interviewState.currentQuestion as Question
-            );
-        }
-        if (data.masterNextAction)
-          setMasterAIResponse(`Master AI next: ${data.masterNextAction}`);
       } catch (error) {
         setMasterAIResponse(`Error: ${(error as Error).message}`);
         console.error("Error sending to Master AI:", error);
@@ -285,10 +213,7 @@ const InterviewDashboard: React.FC = () => {
     },
     [
       rtcSessionId,
-      store.transcript,
       store.setSystemMessages,
-      store.setCurrentQuestion,
-      store.setCurrentScore,
       setMasterAIResponse,
       simulateConversationEventRef,
     ]
@@ -517,13 +442,10 @@ const InterviewDashboard: React.FC = () => {
     store.setTranscript([]);
     store.setSystemMessages([]);
     store.setCurrentQuestion(undefined);
-    setMasterAIResponse("");
     setRtcSessionId(null);
 
     await connectToRealtime();
-    await sendToMasterAIRef.current?.("Interview started (via HTTP init)", {
-      action: "start",
-    });
+    await sendToMasterAIRef.current?.("Interview started (via HTTP init)");
 
     const initialSystemMessage: SystemMessageEntry = {
       id: Date.now(),
@@ -548,9 +470,7 @@ const InterviewDashboard: React.FC = () => {
     }
     setConnectionState("disconnected");
 
-    await sendToMasterAIRef.current?.("Interview concluded by user", {
-      action: "conclude_manual",
-    });
+    await sendToMasterAIRef.current?.("Interview concluded by user");
     simulateConversationEventRef.current?.(
       "ai",
       "Thank you. The interview has concluded."
@@ -586,11 +506,7 @@ const InterviewDashboard: React.FC = () => {
 
     if (sentVia !== "RTC") {
       sendToMasterAIRef.current?.(
-        `System Message (via HTTP): ${customSystemMessage}`,
-        {
-          action: "inject_message",
-          args: { message: customSystemMessage },
-        }
+        `System Message (via HTTP): ${customSystemMessage}`
       );
       sentVia = "HTTP";
     }
@@ -605,83 +521,13 @@ const InterviewDashboard: React.FC = () => {
     setCustomSystemMessage("");
   };
 
-  const callTool = useCallback(async () => {
-    const toolRequestPayload: {
-      toolName: keyof ToolFunctions;
-      args: Record<string, unknown>;
-    } = {
-      toolName: selectedTool,
-      args: {},
-    };
-    const lastCandidateMessage = store.transcript
-      .filter((t) => t.speaker === "candidate")
-      .slice(-1)[0];
-
-    switch (selectedTool) {
-      case "getQuestion":
-        const randQ =
-          store.questionBank[
-            Math.floor(Math.random() * store.questionBank.length)
-          ];
-        if (randQ)
-          toolRequestPayload.args = {
-            category: randQ.category,
-            difficulty: randQ.difficulty,
-          };
-        break;
-      case "evaluateAnswer":
-        toolRequestPayload.args = {
-          question: store.currentQuestion?.question || "N/A",
-          answer: lastCandidateMessage?.message || "No answer.",
-          criteria: ["clarity"],
-        };
-        break;
-      case "updateInterviewState":
-        toolRequestPayload.args = {
-          currentScore: store.currentScore,
-          questionsAsked: store.transcript.filter(
-            (t) => t.speaker === "ai" && t.message.includes("?")
-          ).length,
-        };
-        break;
-      case "analyzeBehavior":
-        toolRequestPayload.args = {
-          transcriptSegment: store.transcript
-            .slice(-3)
-            .map((t) => `${t.speaker}: ${t.message}`)
-            .join("\n"),
-        };
-        break;
-      case "assessTechnicalResponse":
-        toolRequestPayload.args = {
-          question: store.currentQuestion?.question || "N/A",
-          response: lastCandidateMessage?.message || "No answer.",
-          technology: "relevant_tech",
-          expectedConcepts: ["concept1"],
-        };
-        break;
-    }
-    await sendToMasterAIRef.current?.(`Request to call tool: ${selectedTool}`, {
-      action: "tool_call_request",
-      toolName: selectedTool,
-      args: toolRequestPayload.args,
-    });
-    setMasterAIResponse(`Manually requested tool: ${selectedTool} via HTTP.`);
-  }, [
-    selectedTool,
-    store.transcript,
-    store.questionBank,
-    store.currentQuestion,
-    store.currentScore,
-    sendToMasterAIRef,
-    setMasterAIResponse,
-  ]);
-
   const simulateCandidateResponse = useCallback(() => {
     const responses = [
       "I have 5 years experience in React and Node.js.",
       "My strength is problem-solving.",
       "I reduced API response time by 40%.",
+      "I like cats.",
+      "I love dogs!",
     ];
     const randomResponse =
       responses[Math.floor(Math.random() * responses.length)];
@@ -707,9 +553,6 @@ const InterviewDashboard: React.FC = () => {
             stopInterview={stopInterview}
             simulateCandidateResponse={simulateCandidateResponse}
             connectToRealtime={connectToRealtime}
-            callTool={callTool}
-            selectedTool={selectedTool}
-            setSelectedTool={setSelectedTool}
             customSystemMessage={customSystemMessage}
             setCustomSystemMessage={setCustomSystemMessage}
             injectSystemMessage={injectSystemMessage}

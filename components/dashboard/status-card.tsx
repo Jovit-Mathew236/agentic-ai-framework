@@ -15,7 +15,7 @@ const StatusCard = (props: Props) => {
   const getScoreColor = (score: number) => {
     if (score >= 8) return "text-emerald-600 border-emerald-500 bg-emerald-50";
     if (score >= 5) return "text-amber-600 border-amber-500 bg-amber-50"; // Adjusted threshold
-    return "text-red-600 border-red-500 bg-red-50";
+    return "text-red-600 border-red-500";
   };
   return (
     <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">

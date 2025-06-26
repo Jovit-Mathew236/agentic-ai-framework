@@ -1,315 +1,204 @@
 // src/app/api/interview-event/route.ts
 import { NextRequest, NextResponse } from "next/server";
-import { openai } from "@/lib/openai";
-import { openAITools } from "@/lib/openai-tool-definitions";
-import * as MasterTools from "@/lib/master-ai-tools";
-import type {
-  TranscriptEntry,
-  ToolFunctionResponsePayload,
-  BackendToolFunctions,
-  MasterAIToolContext,
-} from "@/lib/interview";
+import OpenAI from "openai";
 import {
   ChatCompletionMessageParam,
-  ChatCompletionMessageToolCall,
+  ChatCompletionMessage,
 } from "openai/resources/chat/completions";
 
-interface ToolCallResultForFrontend {
-  tool_call_id: string;
-  tool_name: string;
-  result: Record<string, unknown>; // Changed from any for stricter typing
-}
+import {
+  getMasterAIContext,
+  updateMasterAIContext,
+  initializeSession,
+  detectAnimal,
+} from "@/lib/master-ai-tools";
+import { openAITools } from "@/lib/openai-tool-definitions";
 
-type MasterToolImplementations = {
-  [K in keyof BackendToolFunctions]: BackendToolFunctions[K];
-};
+// Initialize OpenAI client
+const openai = new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY,
+});
 
-const GREETING_AGENT_INSTRUCTIONS = `
-# Role and Purpose
-You are the **Greeter** in an interview. Your role is to:
-1. Welcome the candidate.
-2. Provide a brief overview of the job and company (details will be in job_data).
-3. Ask 3-4 initial screening questions using the 'getQuestion' tool.
-4. Evaluate each response using the 'storeEvaluation' tool, focusing on intents from job_data.
-5. After evaluations, transfer using 'transferAgents' tool.
+// --- Orchestrator AI Configuration (GPT-4.1 Turbo) ---
+const ORCHESTRATOR_MODEL = "gpt-3.5-turbo"; // Changed from gpt-4-0125-preview
+const ORCHESTRATOR_SYSTEM_PROMPT = `You are an orchestrator. Detect if user mentions cats or dogs. Then call detectAnimal. Based on the output, return only a system message to guide the assistant to ask about the other animal.`;
 
-`;
+// --- Slave AI Configuration (o4-mini) ---
+const SLAVE_MODEL = "gpt-3.5-turbo"; // Changed from openai/gpt-4o-mini
 
 export async function POST(req: NextRequest) {
-  try {
-    const body = await req.json();
-    const userInput: string | null = body.message; // Candidate's message
-    const sessionId: string = body.sessionId || `session_${Date.now()}`; // Manage session ID
-    const action: "start" | "continue" | "tool_response" =
-      body.action || (userInput ? "continue" : "start");
-    const toolResponseData = body.toolResponseData; // Data from our backend tool execution
+  const { sessionId, userMessageContent } = await req.json();
 
-    let currentMasterAIContext = MasterTools.getMasterAIContext(sessionId);
-
-    if (action === "start") {
-      currentMasterAIContext = MasterTools.initializeSession(sessionId);
-      currentMasterAIContext.conversationHistory.push({
-        id: `sys_init_${Date.now()}`,
-        speaker: "system",
-        message:
-          GREETING_AGENT_INSTRUCTIONS +
-          "\nJob Data: " +
-          JSON.stringify(currentMasterAIContext.jobData, null, 2), // Provide job data
-        timestamp: new Date().toISOString(),
-      });
-      MasterTools.updateMasterAIContext(sessionId, {
-        currentTurn: 1,
-        conversationHistory: currentMasterAIContext.conversationHistory,
-      });
-    } else if (userInput) {
-      currentMasterAIContext.conversationHistory.push({
-        id: `user_${Date.now()}`,
-        speaker: "candidate",
-        message: userInput,
-        timestamp: new Date().toISOString(),
-      });
-      MasterTools.updateMasterAIContext(sessionId, {
-        conversationHistory: currentMasterAIContext.conversationHistory,
-        lastCandidateResponse:
-          currentMasterAIContext.conversationHistory.slice(-1)[0],
-      });
-    }
-
-    // Prepare messages for OpenAI API
-    const messagesForOpenAI: ChatCompletionMessageParam[] =
-      currentMasterAIContext.conversationHistory.map(
-        (item: TranscriptEntry) => {
-          if (item.speaker === "candidate") {
-            return {
-              role: "user",
-              content: item.message,
-            };
-          } else if (item.speaker === "ai") {
-            if (item.data?.tool_calls) {
-              return {
-                role: "assistant",
-                content: item.message || null, // Content can be null if only tool_calls are present
-                tool_calls: item.data
-                  .tool_calls as ChatCompletionMessageToolCall[],
-              };
-            } else {
-              return {
-                role: "assistant",
-                content: item.message,
-              };
-            }
-          } else if (item.speaker === "system") {
-            if (item.data?.type === "tool_response" && item.data.tool_call_id) {
-              return {
-                role: "tool",
-                tool_call_id: item.data.tool_call_id,
-                // For tool responses, the 'content' should be the stringified result
-                content: item.message,
-              };
-            } else {
-              return {
-                role: "system",
-                content: item.message,
-              };
-            }
-          }
-          // Fallback for unexpected cases, though ideally all paths are covered
-          return {
-            role: "system",
-            content: `Unexpected history entry from speaker: ${item.speaker}`,
-          };
-        }
-      );
-
-    if (action === "tool_response" && toolResponseData) {
-      messagesForOpenAI.push({
-        role: "tool",
-        tool_call_id: toolResponseData.tool_call_id,
-        content: JSON.stringify(toolResponseData.result),
-      });
-      // Add this tool response to history for our MasterAI tracking
-      currentMasterAIContext.conversationHistory.push({
-        id: toolResponseData.tool_call_id,
-        speaker: "system", // Use speaker instead of role directly
-        message: `Tool response for ${
-          toolResponseData.tool_name
-        }: ${JSON.stringify(toolResponseData.result)}`,
-        timestamp: new Date().toISOString(),
-        data: {
-          type: "tool_response",
-          tool_call_id: toolResponseData.tool_call_id,
-          tool_name: toolResponseData.tool_name,
-        },
-      });
-      MasterTools.updateMasterAIContext(sessionId, {
-        conversationHistory: currentMasterAIContext.conversationHistory,
-      });
-    }
-
-    console.log(
-      `[API /interview-event] Sending to OpenAI. Turn: ${currentMasterAIContext.currentTurn}, Action: ${action}`
+  if (!sessionId || !userMessageContent) {
+    return NextResponse.json(
+      { error: "Session ID and user message are required." },
+      { status: 400 }
     );
-    // console.log("[API /interview-event] Messages for OpenAI:", JSON.stringify(messagesForOpenAI.slice(-5),null,2)); // Log last few
+  }
 
-    const response = await openai.chat.completions.create({
-      model: "gpt-4.1-nano", // Or your preferred model that supports tool calling
-      messages: messagesForOpenAI,
+  let masterAIContext = getMasterAIContext(sessionId);
+
+  if (!masterAIContext) {
+    masterAIContext = initializeSession(sessionId);
+  }
+
+  // Add user message to conversation history for both AIs
+  masterAIContext.conversationHistory.push({
+    id: Date.now(),
+    timestamp: new Date().toISOString(),
+    speaker: "candidate",
+    message: userMessageContent,
+  });
+
+  // --- Step 1: Orchestrator AI (GPT-4.1 Turbo) decides on tool calls ---
+  console.log("[Route] Calling Orchestrator AI...");
+
+  const orchestratorMessages: ChatCompletionMessageParam[] = [
+    { role: "system", content: ORCHESTRATOR_SYSTEM_PROMPT },
+    { role: "user", content: userMessageContent },
+  ];
+
+  try {
+    const orchestratorResponse = await openai.chat.completions.create({
+      model: ORCHESTRATOR_MODEL,
+      messages: orchestratorMessages,
       tools: openAITools,
-      tool_choice: "auto", // OpenAI decides when to call a function
-      temperature: 0.5, // Adjust for desired creativity/strictness
+      tool_choice: "auto",
     });
 
-    const aiResponse = response.choices[0].message;
-    let masterNextActionGuidance: ToolFunctionResponsePayload["nextActionForMaster"] =
-      "wait_for_user";
+    const orchestratorResponseChoice = orchestratorResponse.choices[0];
+    const orchestratorMessage: ChatCompletionMessage =
+      orchestratorResponseChoice.message;
 
-    if (aiResponse.content) {
-      console.log(
-        "[API /interview-event] AI text response:",
-        aiResponse.content
-      );
-      currentMasterAIContext.conversationHistory.push({
-        id: `ai_${Date.now()}`,
-        speaker: "ai", // Use speaker instead of role directly
-        message: aiResponse.content,
-        timestamp: new Date().toISOString(),
-      });
-      MasterTools.updateMasterAIContext(sessionId, {
-        conversationHistory: currentMasterAIContext.conversationHistory,
-      });
-    }
-
-    // Handle tool calls if any
-    const toolCalls = aiResponse.tool_calls;
-    let immediateToolResponseRequired = false;
-    const toolCallResultsForFrontend: ToolCallResultForFrontend[] = [];
-
-    if (toolCalls) {
-      console.log("[API /interview-event] AI wants to call tools:", toolCalls);
-      // Add the AI's intent to call tools to history
-      const lastHistoryItem =
-        currentMasterAIContext.conversationHistory[
-          currentMasterAIContext.conversationHistory.length - 1
-        ];
-      if (
-        lastHistoryItem &&
-        lastHistoryItem.speaker === "ai" &&
-        !lastHistoryItem.data?.tool_calls
-      ) {
-        // If it's the same AI message
-        lastHistoryItem.data = {
-          ...(lastHistoryItem.data || {}),
-          tool_calls: toolCalls,
-        };
-      } else {
-        // Or if it's a new system entry for the tool call intent
-        currentMasterAIContext.conversationHistory.push({
-          id: `ai_tool_intent_${Date.now()}`,
-          speaker: "ai", // Use speaker instead of role directly
-          message: `[AI intends to use tool(s): ${toolCalls
-            .map((tc) => tc.function.name)
-            .join(", ")}]`,
-          timestamp: new Date().toISOString(),
-          data: { tool_calls: toolCalls },
-        });
-      }
-      MasterTools.updateMasterAIContext(sessionId, {
-        conversationHistory: currentMasterAIContext.conversationHistory,
-      });
-
-      for (const toolCall of toolCalls) {
-        const functionName = toolCall.function
-          .name as keyof BackendToolFunctions;
+    // --- Step 2: Handle tool calls from Orchestrator AI ---
+    if (
+      orchestratorMessage.tool_calls &&
+      orchestratorMessage.tool_calls.length > 0
+    ) {
+      console.log("[Route] Orchestrator AI made tool calls.");
+      for (const toolCall of orchestratorMessage.tool_calls) {
+        const functionName = toolCall.function.name;
         const functionArgs = JSON.parse(toolCall.function.arguments);
 
-        console.log(
-          `[API /interview-event] Executing tool: ${functionName} with args:`,
-          functionArgs
-        );
+        if (functionName === "detectAnimal") {
+          console.log(`[Route] Executing tool: ${functionName}`);
 
-        // Type assertion for MasterTools to ensure we only access functions defined in BackendToolFunctions
-        const toolFn = (MasterTools as MasterToolImplementations)[functionName];
-
-        if (toolFn) {
-          const resultPayload: ToolFunctionResponsePayload = await toolFn(
+          const toolResult = await detectAnimal(
             functionArgs,
-            currentMasterAIContext as MasterAIToolContext, // Cast to MasterAIToolContext
+            masterAIContext,
             sessionId
           );
 
-          toolCallResultsForFrontend.push({
+          // Add tool output to orchestrator's conversation history for context
+          orchestratorMessages.push({
             tool_call_id: toolCall.id,
-            tool_name: functionName,
-            result: resultPayload.data || {
-              success: resultPayload.success,
-              error: resultPayload.error,
-            },
+            role: "tool",
+            content: JSON.stringify(toolResult.data || toolResult.error),
           });
 
-          if (resultPayload.nextSystemMessageToSlave) {
-            // This is tricky. If a tool execution immediately yields a new system message,
-            // it implies the *next* turn for the slave AI should use it.
-            // For now, we'll let the next OpenAI call handle it based on updated history.
-            console.log(
-              `[API /interview-event] Tool ${functionName} suggests next system message: ${resultPayload.nextSystemMessageToSlave}`
+          // --- Step 3: Get Orchestrator AI's final system message based on tool result ---
+          console.log("[Route] Getting Orchestrator AI's final response...");
+          const finalOrchestratorResponse =
+            await openai.chat.completions.create({
+              model: ORCHESTRATOR_MODEL,
+              messages: orchestratorMessages,
+            });
+
+          const finalOrchestratorMessage: ChatCompletionMessage =
+            finalOrchestratorResponse.choices[0].message;
+
+          // The orchestrator is designed to return a system message. Directly use its content.
+          const systemMessageContent = finalOrchestratorMessage.content || "";
+
+          if ((finalOrchestratorMessage.role as string) !== "system") {
+            console.warn(
+              `[Route] Orchestrator AI returned unexpected role: ${finalOrchestratorMessage.role}. Using content as system message anyway.`
             );
           }
-          if (resultPayload.nextActionForMaster) {
-            masterNextActionGuidance = resultPayload.nextActionForMaster;
-          }
-          if (
-            functionName === "storeEvaluation" ||
-            functionName === "getQuestion"
-          ) {
-            MasterTools.updateMasterAIContext(sessionId, {
-              currentTurn: currentMasterAIContext.currentTurn + 1,
-            });
-          }
-        } else {
-          console.error(
-            `[API /interview-event] Unknown tool function: ${functionName}`
+          console.log(
+            `[Route] Orchestrator AI system message: ${systemMessageContent}`
           );
-          toolCallResultsForFrontend.push({
-            tool_call_id: toolCall.id,
-            tool_name: functionName,
-            result: { error: `Unknown tool function: ${functionName}` },
+          updateMasterAIContext(sessionId, {
+            masterAISystemMessage: systemMessageContent,
           });
         }
       }
-      immediateToolResponseRequired = true; // We need to send these results back to OpenAI
+    } else if (orchestratorMessage.content) {
+      // If no tool calls, but orchestrator has a direct message, use it as system message
+      console.log(
+        `[Route] Orchestrator AI direct message: ${orchestratorMessage.content}`
+      );
+      updateMasterAIContext(sessionId, {
+        masterAISystemMessage: orchestratorMessage.content || "",
+      });
     }
-
-    const updatedContext = MasterTools.getMasterAIContext(sessionId);
-
-    return NextResponse.json({
-      sessionId: sessionId,
-      aiMessage: aiResponse.content, // Text part of AI's response
-      toolCalls: toolCalls, // If AI wants to call a tool, frontend needs to know to send back results
-      toolCallResults: immediateToolResponseRequired
-        ? toolCallResultsForFrontend
-        : undefined,
-      history: updatedContext.conversationHistory,
-      interviewState: {
-        // Send relevant parts of master AI context
-        currentTurn: updatedContext.currentTurn,
-        evaluations: updatedContext.currentEvaluations,
-        overallScore: updatedContext.currentOverallScore,
-        currentQuestion: updatedContext.currentQuestion,
-        concluded: updatedContext.concluded || false,
-        jobTitle: updatedContext.jobData?.job_details?.title,
-      },
-      // Guidance for frontend based on master AI's state after tool execution
-      masterNextAction: masterNextActionGuidance,
-    });
   } catch (error) {
-    console.error("API Error in /interview-event:", error);
-    let errorMessage = "An unknown error occurred";
-    if (error instanceof Error) {
-      errorMessage = error.message;
-    }
+    console.error("Error during Orchestrator AI processing:", error);
     return NextResponse.json(
-      { error: errorMessage, history: [] },
+      { error: "Failed to process Orchestrator AI response." },
       { status: 500 }
     );
   }
+
+  // --- Step 4: Slave AI (o4-mini) generates response using updated context ---
+  console.log("[Route] Calling Slave AI...");
+
+  masterAIContext = getMasterAIContext(sessionId); // Get updated context
+
+  const slaveAIMessages: ChatCompletionMessageParam[] = [
+    {
+      role: "system",
+      content:
+        masterAIContext.masterAISystemMessage || "You are a helpful assistant.",
+    },
+    // Add previous conversation history from masterAIContext
+    ...masterAIContext.conversationHistory.map((entry) => {
+      let role: "user" | "assistant" | "system";
+      if (entry.speaker === "candidate") {
+        role = "user";
+      } else if (entry.speaker === "ai") {
+        role = "assistant";
+      } else {
+        role = "system";
+      }
+      return { role, content: entry.message };
+    }),
+  ];
+
+  try {
+    const slaveAIResponse = await openai.chat.completions.create({
+      model: SLAVE_MODEL,
+      messages: slaveAIMessages,
+      // Stream: true if you want to stream the response
+    });
+
+    const assistantResponseContent = slaveAIResponse.choices[0].message.content;
+
+    if (assistantResponseContent) {
+      // Add Slave AI's response to conversation history
+      masterAIContext.conversationHistory.push({
+        id: Date.now() + 1,
+        timestamp: new Date().toISOString(),
+        speaker: "ai",
+        message: assistantResponseContent,
+      });
+
+      updateMasterAIContext(sessionId, { ...masterAIContext }); // Save updated history
+
+      return NextResponse.json({
+        response: assistantResponseContent,
+        masterAISystemMessage: masterAIContext.masterAISystemMessage,
+      });
+    }
+  } catch (error) {
+    console.error("Error during Slave AI processing:", error);
+    return NextResponse.json(
+      { error: "Failed to get response from Slave AI." },
+      { status: 500 }
+    );
+  }
+
+  return NextResponse.json({ response: "No response generated." });
 }
+
+// Removed: initializeInterview, interviewSessionStore, jobDataStore, and all other interview-related endpoints and logic.
