@@ -90,11 +90,139 @@ const InterviewDashboard: React.FC = () => {
 
   // Buffer configuration - REDUCED for more frequent sending
   const BUFFER_TIMEOUT = 5000; // Send to master every 5 seconds
-  // const MAX_BUFFER_SIZE = 2; // Or when buffer reaches 2 messages (1 user + 1 assistant)
-
   const isAudioPlaybackEnabled = true;
 
-  // Refs for functions to break dependency cycles
+  const flushConversationBuffer = useCallback(async () => {
+    const buffer = conversationBufferRef.current;
+    if (buffer.messages.length === 0) return;
+
+    console.log(
+      `[BUFFER] Flushing ${buffer.messages.length} messages to Master AI`
+    );
+    try {
+      const response = await fetch("/api/interview-event", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          sessionId: rtcSessionId || `client-${crypto.randomUUID()}`,
+          conversationBatch: buffer.messages,
+          type: "conversation_batch",
+        }),
+      });
+
+      if (!response.ok) {
+        throw new Error(`Master AI API failed with status: ${response.status}`);
+      }
+
+      const data = await response.json();
+      console.log(`[BUFFER] Master AI response:`, data);
+
+      if (
+        data.masterAISystemMessage &&
+        data.masterAISystemMessage !== "No intervention needed."
+      ) {
+        console.log(
+          `[BUFFER] Master AI intervention: ${data.masterAISystemMessage}`
+        );
+        let sentVia = "";
+        if (
+          connectionState === "connected" &&
+          dcRef.current?.readyState === "open"
+        ) {
+          const systemMessagePayload = {
+            type: "conversation.item.create",
+            item: {
+              type: "message",
+              role: "system",
+              content: [
+                { type: "input_text", text: data.masterAISystemMessage },
+              ],
+            },
+          };
+          const sent = sendMessageOnDataChannel(
+            dcRef.current,
+            systemMessagePayload
+          );
+          sentVia = sent ? "RTC" : "FAILED_RTC_SEND";
+        } else {
+          sentVia = "FAILED_RTC_DELIVERY";
+        }
+
+        setMasterAIResponse(
+          `Master AI Intervention (${sentVia}): ${data.masterAISystemMessage}`
+        );
+        store.setSystemMessages((prev) => [
+          ...prev,
+          {
+            id: Date.now(),
+            timestamp: new Date().toLocaleTimeString(),
+            role: "system",
+            content: `Master AI (${sentVia}): ${data.masterAISystemMessage}`,
+            toolUsed: "master_ai_orchestration",
+          },
+        ]);
+      } else {
+        setMasterAIResponse("Master AI: Monitoring - No intervention needed");
+      }
+
+      if (data.sessionId && !rtcSessionId) setRtcSessionId(data.sessionId);
+      buffer.messages = [];
+      buffer.lastSent = Date.now();
+    } catch (error) {
+      console.error(
+        "[BUFFER] Error sending/processing conversation batch:",
+        error
+      );
+      setMasterAIResponse(
+        `Error communicating with Master AI: ${(error as Error).message}`
+      );
+    }
+  }, [rtcSessionId, connectionState, store.setSystemMessages]);
+
+  const injectSystemMessage = useCallback(async () => {
+    if (!customSystemMessage.trim()) return;
+
+    let sentVia = "N/A";
+    if (
+      connectionState === "connected" &&
+      dcRef.current?.readyState === "open"
+    ) {
+      const systemMessagePayload: ServerEvent = {
+        type: "conversation.item.create",
+        item: {
+          type: "message",
+          role: "system",
+          content: [{ type: "input_text", text: customSystemMessage }],
+        },
+      };
+      const sent = sendMessageOnDataChannel(
+        dcRef.current,
+        systemMessagePayload
+      );
+      sentVia = sent ? "RTC" : "FAILED_RTC_SEND";
+      console.log(
+        `Manual system message injection attempt via RTC: ${sentVia}`
+      );
+    } else {
+      sentVia = "FAILED_RTC_DELIVERY";
+      console.warn("RTC not open. Manual system message cannot be sent.");
+    }
+
+    setMasterAIResponse(`Manual Injection Status: ${sentVia}`);
+    store.setSystemMessages((prev) => [
+      ...prev,
+      {
+        id: Date.now(),
+        timestamp: new Date().toLocaleTimeString(),
+        role: "system",
+        content: `Manual Injection: "${customSystemMessage}" (Frontend send attempt: ${sentVia})`,
+        toolUsed: `manual_injection`,
+      },
+    ]);
+    setCustomSystemMessage("");
+  }, [customSystemMessage, connectionState, store.setSystemMessages]);
+
+  // --- Refs for functions to break dependency cycles ---
   const simulateConversationEventRef =
     useRef<
       (
@@ -201,158 +329,6 @@ const InterviewDashboard: React.FC = () => {
     },
     []
   );
-
-  // FIXED: Flush conversation buffer to master AI and handle interventions
-  // FIXED: Flush conversation buffer to master AI with proper RTC state checking
-  const flushConversationBuffer = useCallback(async () => {
-    const buffer = conversationBufferRef.current;
-    if (buffer.messages.length === 0) {
-      console.log("[BUFFER] No messages to flush");
-      return;
-    }
-
-    console.log(
-      `[BUFFER] Flushing ${buffer.messages.length} messages to Master AI`
-    );
-
-    try {
-      const response = await fetch("/api/interview-event", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          sessionId: rtcSessionId || `client-${crypto.randomUUID()}`,
-          conversationBatch: buffer.messages,
-          type: "conversation_batch",
-        }),
-      });
-
-      console.log(
-        `[BUFFER] Master AI request sent, status: ${response.status}`
-      );
-
-      if (response.ok) {
-        const data = await response.json();
-        console.log(`[BUFFER] Master AI response:`, data);
-
-        // Handle master AI instructions
-        if (
-          data.masterAISystemMessage &&
-          data.masterAISystemMessage !== "No intervention needed."
-        ) {
-          console.log(
-            `[BUFFER] Master AI intervention: ${data.masterAISystemMessage}`
-          );
-
-          // Check RTC data channel state properly and implement fallback
-          let sentVia = "";
-
-          if (
-            connectionState === "connected" &&
-            dcRef.current &&
-            dcRef.current.readyState === "open"
-          ) {
-            // Use response.create for system instructions (correct OpenAI Realtime API format)
-            const systemMessagePayload = {
-              type: "conversation.item.create",
-              item: {
-                // id: id,
-                type: "message",
-                role: "system",
-                content: [
-                  {
-                    type: "input_text",
-                    text: data.masterAISystemMessage,
-                  },
-                ],
-              },
-            };
-
-            const sent = sendMessageOnDataChannel(
-              dcRef.current,
-              systemMessagePayload
-            );
-
-            if (sent) {
-              sentVia = "RTC";
-              console.log(
-                "System instruction sent to Slave AI via RTC:",
-                systemMessagePayload
-              );
-            } else {
-              console.warn(
-                "RTC send failed despite channel being open, falling back to HTTP."
-              );
-            }
-          } else {
-            console.warn(
-              `RTC not available for system message. State: ${connectionState}, Channel: ${
-                dcRef.current?.readyState || "null"
-              }. Falling back to HTTP.`
-            );
-          }
-
-          if (sentVia !== "RTC") {
-            // Master AI intervention detected, but RTC is unavailable.
-            // The frontend cannot send this to Slave AI via RTC. The backend (Master AI) is not configured
-            // to send these specific intervention messages to Slave AI via HTTP.
-            // We will only log this limitation and update the UI.
-            console.warn(
-              "Master AI intervention detected, but RTC channel unavailable for Slave AI delivery."
-            );
-            sentVia = "FAILED_RTC_DELIVERY"; // Indicate failed RTC delivery
-          }
-
-          setMasterAIResponse(
-            `Master AI Intervention (${sentVia}): ${data.masterAISystemMessage}`
-          );
-
-          // Add system message to UI
-          const uiMessage: SystemMessageEntry = {
-            id: Date.now(),
-            timestamp: new Date().toLocaleTimeString(),
-            role: "system",
-            content: `Master AI (${sentVia}): ${data.masterAISystemMessage}`,
-            toolUsed: "master_ai_orchestration",
-          };
-          store.setSystemMessages((prev) => [...prev, uiMessage]);
-        } else {
-          setMasterAIResponse("Master AI: Monitoring - No intervention needed");
-          console.log("[BUFFER] Master AI: No intervention needed");
-        }
-
-        // Update session ID if needed
-        if (data.sessionId && !rtcSessionId) {
-          setRtcSessionId(data.sessionId);
-        }
-
-        // Clear buffer after successful send
-        buffer.messages = [];
-        buffer.lastSent = Date.now();
-
-        console.log(
-          "[BUFFER] Conversation batch sent successfully to Master AI"
-        );
-      } else {
-        console.error(
-          "[BUFFER] Failed to send conversation batch:",
-          response.status
-        );
-        const errorText = await response.text();
-        console.error("[BUFFER] Error response:", errorText);
-        setMasterAIResponse(
-          `Error sending to Master AI: ${response.statusText}`
-        );
-      }
-    } catch (error) {
-      console.error(
-        "[BUFFER] Error sending conversation batch to Master AI:",
-        error
-      );
-      setMasterAIResponse(
-        `Error communicating with Master AI: ${(error as Error).message}`
-      );
-    }
-  }, [rtcSessionId, connectionState, store.setSystemMessages]);
 
   // Auto-flush buffer on interval
   useEffect(() => {
@@ -774,113 +750,6 @@ const InterviewDashboard: React.FC = () => {
       "Thank you. The interview has concluded."
     );
   };
-
-  // Manual system message injection
-  const injectSystemMessage = useCallback(async () => {
-    if (!customSystemMessage.trim()) return;
-    const systemMessagePayload: ServerEvent = {
-      type: "conversation.item.create",
-      item: {
-        type: "message",
-        role: "system",
-        content: [
-          {
-            type: "input_text",
-            text: customSystemMessage,
-          },
-        ],
-      },
-    };
-    let sentVia = "";
-
-    if (
-      connectionState === "connected" &&
-      dcRef.current &&
-      dcRef.current.readyState === "open"
-    ) {
-      const sent = sendMessageOnDataChannel(
-        dcRef.current,
-        systemMessagePayload
-      );
-      if (sent) {
-        sentVia = "RTC";
-        console.log(
-          "Manual system message sent via RTC:",
-          systemMessagePayload
-        );
-      } else {
-        console.warn("RTC send failed for manual system message, trying HTTP.");
-      }
-    } else {
-      console.warn(
-        "RTC is not open, falling back to HTTP for manual system message."
-      );
-    }
-
-    if (sentVia !== "RTC") {
-      try {
-        // Fallback to HTTP by sending to Master AI backend for forwarding
-        const response = await fetch("/api/interview-event", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            sessionId: rtcSessionId || `client-${crypto.randomUUID()}`,
-            type: "system_message_injection",
-            customSystemMessageContent: customSystemMessage,
-          }),
-        });
-
-        if (response.ok) {
-          const data = await response.json();
-          console.log(
-            "[Manual System Message] Backend injection request successful:",
-            data
-          );
-          if (data.masterAISystemMessage) {
-            setMasterAIResponse(data.masterAISystemMessage); // Use the masterAISystemMessage directly from the backend
-            if (data.masterAISystemMessage.includes("Forwarded via HTTP")) {
-              sentVia = "HTTP_TO_BACKEND"; // Indicate it went via HTTP to backend
-            } else {
-              sentVia = "FAILED_HTTP_REQUEST"; // Mark if frontend request to backend failed
-            }
-          }
-        } else {
-          console.error(
-            "[Manual System Message] Backend injection request failed:",
-            response.status
-          );
-          setMasterAIResponse(
-            `Error requesting backend injection: ${response.statusText}`
-          );
-          sentVia = "FAILED_HTTP_REQUEST";
-        }
-      } catch (error) {
-        console.error(
-          "[Manual System Message] Error during backend injection request:",
-          error
-        );
-        setMasterAIResponse(
-          `Error during backend injection request: ${(error as Error).message}`
-        );
-        sentVia = "FAILED_HTTP_REQUEST";
-      }
-    }
-
-    const uiMessage: SystemMessageEntry = {
-      id: Date.now(),
-      timestamp: new Date().toLocaleTimeString(),
-      role: "system",
-      content: `Manual Injection: "${customSystemMessage}" (Frontend send: ${sentVia})`,
-      toolUsed: `manual_injection`,
-    };
-    store.setSystemMessages((prev) => [...prev, uiMessage]);
-    setCustomSystemMessage("");
-  }, [
-    customSystemMessage,
-    connectionState,
-    rtcSessionId,
-    store.setSystemMessages,
-  ]);
 
   const simulateCandidateResponse = useCallback(() => {
     const responses = [

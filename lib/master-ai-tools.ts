@@ -69,5 +69,3 @@ export function initializeSession(sessionId: string): MasterAIToolContext {
   interviewSessionStore[sessionId] = newContext;
   return newContext;
 }
-
-// Removed: loadJobData, jobDataStore, sampleJobData and all other interview-related tool implementations.

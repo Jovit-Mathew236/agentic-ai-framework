@@ -36,47 +36,7 @@ interface ConversationMessageForBatch {
   timestamp: number;
 }
 
-// Helper to simulate sending system messages to Slave AI via HTTP
-async function sendSystemMessageToSlaveAI(
-  sessionId: string,
-  message: string
-): Promise<string> {
-  console.log(
-    `[Master AI Backend] Attempting to send system message to Slave AI via HTTP: ${message}`
-  );
-  try {
-    // This is a hypothetical endpoint for the Slave AI to receive system messages
-    // In a real application, replace this with the actual Slave AI API endpoint
-    const slaveAiResponse = await fetch(
-      "http://localhost:3001/api/slave-ai-system-message",
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ sessionId, systemMessage: message }),
-      }
-    );
-
-    if (!slaveAiResponse.ok) {
-      const errorText = await slaveAiResponse.text();
-      console.error(
-        `[Master AI Backend] Failed to send to Slave AI (${slaveAiResponse.status}): ${errorText}`
-      );
-      return `Failed to forward to Slave AI (${slaveAiResponse.status}): ${slaveAiResponse.statusText}`;
-    } else {
-      console.log(
-        "[Master AI Backend] Successfully forwarded system message to Slave AI."
-      );
-      return "Forwarded via HTTP";
-    }
-  } catch (error) {
-    console.error(
-      `[Master AI Backend] Error forwarding to Slave AI: ${
-        (error as Error).message
-      }`
-    );
-    return `Error forwarding to Slave AI: ${(error as Error).message}`;
-  }
-}
+// REMOVED: The failing sendSystemMessageToSlaveAI function is no longer needed.
 
 export async function POST(req: NextRequest) {
   try {
@@ -95,43 +55,37 @@ export async function POST(req: NextRequest) {
       masterAIContext = initializeSession(sessionId);
     }
 
-    // Handle system message injection (NEW) - Backend now forwards to Slave AI
+    // Handle system message injection - it will now be handled by the frontend via RTC
     if (type === "system_message_injection" && customSystemMessageContent) {
       console.log(
-        "[Master AI] Direct system message injection requested by frontend:",
+        "[Master AI] System message injection instruction received from frontend:",
         customSystemMessageContent
       );
-
-      const forwardingStatus = await sendSystemMessageToSlaveAI(
-        sessionId,
-        customSystemMessageContent
-      );
-
+      // The backend no longer forwards this. It just acknowledges and returns.
+      // The frontend will be responsible for the injection via WebRTC.
       updateMasterAIContext(sessionId, {
-        masterAISystemMessage: `Injected (Backend Status: ${forwardingStatus}): ${customSystemMessageContent}`,
+        masterAISystemMessage: `Instruction for manual injection: ${customSystemMessageContent}`,
       });
 
       return NextResponse.json({
-        masterAISystemMessage: `Injected (Backend Status: ${forwardingStatus}): ${customSystemMessageContent}`,
+        masterAISystemMessage: customSystemMessageContent, // Return the raw message for the frontend to send
         sessionId: sessionId,
       });
     }
 
-    // Handle batch conversation processing (MAIN FLOW)
+    // Handle batch conversation processing
     if (type === "conversation_batch" && conversationBatch) {
       console.log("[Master AI] Processing conversation batch...");
 
-      // Add all messages from batch to conversation history with type safety
-      conversationBatch.forEach((msg: ConversationMessageForBatch) => {
-        masterAIContext.conversationHistory.push({
+      masterAIContext.conversationHistory.push(
+        ...(conversationBatch as ConversationMessageForBatch[]).map((msg) => ({
           id: Date.now() + Math.random(),
-          timestamp: new Date().toISOString(),
+          timestamp: new Date(msg.timestamp).toISOString(),
           speaker: msg.role,
           message: msg.content,
-        });
-      });
+        }))
+      );
 
-      // Analyze the conversation batch
       const recentConversation = (
         conversationBatch as ConversationMessageForBatch[]
       )
@@ -140,34 +94,15 @@ export async function POST(req: NextRequest) {
 
       console.log("[Master AI] Analyzing conversation:", recentConversation);
 
-      // Prepare messages for OpenAI API
       const masterMessages: ChatCompletionMessageParam[] = [
-        {
-          role: "system",
-          content: MASTER_SYSTEM_PROMPT,
-        },
-        // Add previous conversation history if available, filtering for relevant roles
-        ...masterAIContext.conversationHistory
-          .filter(
-            (entry) => entry.speaker === "user" || entry.speaker === "assistant"
-          )
-          .slice(-5)
-          .map(
-            (entry) =>
-              ({
-                role: entry.speaker,
-                content: entry.message,
-              } as ChatCompletionMessageParam)
-          ),
-        // Current exchange
+        { role: "system", content: MASTER_SYSTEM_PROMPT },
         {
           role: "user",
           content: `Analyze this conversation exchange and determine if intervention is needed:\n\n${recentConversation}`,
         },
       ];
 
-      let finalSystemInstruction = "No intervention needed."; // Default
-      let toolArgs: DetectAnimalArgs | undefined = undefined; // To store arguments if a tool is called, with improved type
+      let finalSystemInstruction = "No intervention needed.";
 
       try {
         const masterResponse = await openai.chat.completions.create({
@@ -179,39 +114,22 @@ export async function POST(req: NextRequest) {
 
         const masterMessage = masterResponse.choices[0].message;
 
-        // Handle tool calls if present
         if (masterMessage.tool_calls && masterMessage.tool_calls.length > 0) {
           console.log("[Master AI] Tool calls detected");
+          masterMessages.push(masterMessage);
 
-          // Add the assistant message with tool calls to the conversation
-          // Ensure content is not null if it\'s a tool_call-only message
-          masterMessages.push({
-            role: "assistant",
-            content: masterMessage.content || null, // Can be null for tool-only messages
-            tool_calls: masterMessage.tool_calls,
-          });
-
-          // Process each tool call
           for (const toolCall of masterMessage.tool_calls) {
             const functionName = toolCall.function.name;
             const functionArgs: DetectAnimalArgs = JSON.parse(
               toolCall.function.arguments
             );
-            toolArgs = functionArgs; // Store args for later
 
             if (functionName === "detectAnimal") {
-              console.log(
-                `[Master AI] Executing tool: ${functionName} with args:`,
-                functionArgs
-              );
-
               const toolResult = await detectAnimal(
                 functionArgs,
                 masterAIContext,
                 sessionId
               );
-
-              // Add tool response to the conversation
               masterMessages.push({
                 role: "tool",
                 tool_call_id: toolCall.id,
@@ -220,79 +138,30 @@ export async function POST(req: NextRequest) {
             }
           }
 
-          // Get final response from master after tool execution
-          console.log("[Master AI] Getting final intervention decision...");
           const finalMasterResponse = await openai.chat.completions.create({
             model: MASTER_MODEL,
-            messages: masterMessages, // Now includes tool results
+            messages: masterMessages,
           });
 
-          const finalMessage = finalMasterResponse.choices[0].message;
-
-          if (finalMessage.content) {
-            console.log(`[Master AI] Final decision: ${finalMessage.content}`);
-            finalSystemInstruction = finalMessage.content; // This is the instruction for the interviewer
-
-            // Attempt to forward Master AI intervention to Slave AI via HTTP
-            if (finalSystemInstruction !== "No intervention needed.") {
-              const forwardingStatus = await sendSystemMessageToSlaveAI(
-                sessionId,
-                finalSystemInstruction
-              );
-              finalSystemInstruction = `Master AI Intervention (Backend Status: ${forwardingStatus}): ${finalSystemInstruction}`;
-            }
-          } else {
-            // If no content but tool was called, construct a basic instruction
-            if (toolArgs) {
-              const definiteToolArgs: DetectAnimalArgs = toolArgs; // Explicitly assert type
-              if (definiteToolArgs.animal === "cat") {
-                finalSystemInstruction =
-                  "The candidate mentioned cats. Ask them about their experience with dinosaurs or pets in general.";
-              } else if (definiteToolArgs.animal === "dinosaur") {
-                finalSystemInstruction =
-                  "The candidate mentioned dinosaurs. Ask them about their experience with cats or other pets.";
-              } else {
-                finalSystemInstruction = "No intervention needed.";
-              }
-
-              // Attempt to forward Master AI intervention to Slave AI via HTTP (for tool-generated instructions)
-              if (finalSystemInstruction !== "No intervention needed.") {
-                const forwardingStatus = await sendSystemMessageToSlaveAI(
-                  sessionId,
-                  finalSystemInstruction
-                );
-                finalSystemInstruction = `Master AI Intervention (Backend Status: ${forwardingStatus}): ${finalSystemInstruction}`;
-              }
-            }
+          if (finalMasterResponse.choices[0].message.content) {
+            finalSystemInstruction =
+              finalMasterResponse.choices[0].message.content;
           }
         } else if (masterMessage.content) {
-          // No tool calls, use direct response
-          console.log(`[Master AI] Direct response: ${masterMessage.content}`);
           finalSystemInstruction = masterMessage.content;
-
-          // Attempt to forward Master AI intervention to Slave AI via HTTP
-          if (finalSystemInstruction !== "No intervention needed.") {
-            const forwardingStatus = await sendSystemMessageToSlaveAI(
-              sessionId,
-              finalSystemInstruction
-            );
-            finalSystemInstruction = `Master AI Intervention (Backend Status: ${forwardingStatus}): ${finalSystemInstruction}`;
-          }
         }
 
-        // Update the context with the determined system instruction
+        console.log(`[Master AI] Final decision: ${finalSystemInstruction}`);
         updateMasterAIContext(sessionId, {
           masterAISystemMessage: finalSystemInstruction,
         });
 
-        // Important: Return the system instruction in the response
         return NextResponse.json({
-          masterAISystemMessage: finalSystemInstruction,
+          masterAISystemMessage: finalSystemInstruction, // Return the final instruction
           sessionId: sessionId,
         });
       } catch (error) {
         console.error("Error processing conversation batch:", error);
-        // Update context with an error message if processing fails
         updateMasterAIContext(sessionId, {
           masterAISystemMessage: `Error processing conversation: ${
             (error as Error).message
@@ -305,9 +174,8 @@ export async function POST(req: NextRequest) {
       }
     }
 
-    // Default response for other request types
     return NextResponse.json({
-      masterAISystemMessage: "No intervention needed.", // Default if no batch processing occurred
+      masterAISystemMessage: "Request type not handled.",
       sessionId: sessionId,
     });
   } catch (error) {
