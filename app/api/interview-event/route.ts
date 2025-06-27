@@ -2,46 +2,47 @@
 import { NextRequest, NextResponse } from "next/server";
 import OpenAI from "openai";
 import { ChatCompletionMessageParam } from "openai/resources/chat/completions";
-
 import {
-  getMasterAIContext,
-  updateMasterAIContext,
+  getMasterContext,
+  updateMasterContext,
   initializeSession,
-  detectAnimal,
+  toolFunctions,
 } from "@/lib/master-ai-tools";
 import { openAITools } from "@/lib/openai-tool-definitions";
-import { DetectAnimalArgs } from "@/lib/interview";
 
 // Initialize OpenAI client
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
 });
 
-// --- Master AI Configuration ---
-const MASTER_MODEL = "gpt-4.1-nano-2025-04-14";
-const MASTER_SYSTEM_PROMPT = `You are a silent interview monitor. Your job is to:
-1. Analyze conversation exchanges between interviewer and candidate
-2. ALWAYS call detectAnimal function when you see mentions of: cats, dogs, or any animals
-3. Look for keywords like "cat", "cats", "dog", "dogs", "pet", "pets" in the conversation
-4. Based on detection results, provide specific instructions to guide the interviewer
-5. If no animals are mentioned, respond with "No intervention needed."
-6. Keep responses concise and focused on interview flow management
+// Master AI Configuration
 
-IMPORTANT: When you see animal-related words, you MUST call the detectAnimal function.`;
+const MASTER_MODEL = "gpt-4.1-nano-2025-04-14"; // Using a more reliable model
+const MASTER_SYSTEM_PROMPT = `You are a Master AI conversation monitor. Your job is to:
 
-// Interface for incoming conversation messages in the batch
+1. Analyze conversation exchanges between participants
+2. ONLY call tools when you clearly detect the specified conditions
+3. If no clear triggers detected, respond with "No intervention needed."
+4. Do NOT call tools for unrelated conversations
+
+Available tools: ${openAITools.map((tool) => tool.function.name).join(", ")}
+Available tools descriptions: call this ${openAITools
+  .map((tool) => tool.function.name)
+  .join(", ")} when ${openAITools
+  .map((tool) => tool.function.description)
+  .join(", ")}
+`;
+
+// Interface for incoming conversation messages
 interface ConversationMessageForBatch {
   role: "user" | "assistant";
   content: string;
   timestamp: number;
 }
 
-// REMOVED: The failing sendSystemMessageToSlaveAI function is no longer needed.
-
 export async function POST(req: NextRequest) {
   try {
-    const { sessionId, conversationBatch, type, customSystemMessageContent } =
-      await req.json();
+    const { sessionId, conversationBatch, type } = await req.json();
 
     if (!sessionId) {
       return NextResponse.json(
@@ -50,34 +51,17 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    let masterAIContext = getMasterAIContext(sessionId);
-    if (!masterAIContext) {
-      masterAIContext = initializeSession(sessionId);
-    }
-
-    // Handle system message injection - it will now be handled by the frontend via RTC
-    if (type === "system_message_injection" && customSystemMessageContent) {
-      console.log(
-        "[Master AI] System message injection instruction received from frontend:",
-        customSystemMessageContent
-      );
-      // The backend no longer forwards this. It just acknowledges and returns.
-      // The frontend will be responsible for the injection via WebRTC.
-      updateMasterAIContext(sessionId, {
-        masterAISystemMessage: `Instruction for manual injection: ${customSystemMessageContent}`,
-      });
-
-      return NextResponse.json({
-        masterAISystemMessage: customSystemMessageContent, // Return the raw message for the frontend to send
-        sessionId: sessionId,
-      });
+    let masterContext = getMasterContext(sessionId);
+    if (!masterContext) {
+      masterContext = initializeSession(sessionId);
     }
 
     // Handle batch conversation processing
     if (type === "conversation_batch" && conversationBatch) {
       console.log("[Master AI] Processing conversation batch...");
 
-      masterAIContext.conversationHistory.push(
+      // Add to conversation history
+      masterContext.conversationHistory.push(
         ...(conversationBatch as ConversationMessageForBatch[]).map((msg) => ({
           id: Date.now() + Math.random(),
           timestamp: new Date(msg.timestamp).toISOString(),
@@ -98,75 +82,136 @@ export async function POST(req: NextRequest) {
         { role: "system", content: MASTER_SYSTEM_PROMPT },
         {
           role: "user",
-          content: `Analyze this conversation exchange and determine if intervention is needed:\n\n${recentConversation}`,
+          content: `Analyze this conversation exchange and determine if intervention is needed. If you detect any trigger, you MUST call the appropriate tools:\n\n${recentConversation}`,
         },
       ];
 
       let finalSystemInstruction = "No intervention needed.";
 
       try {
+        console.log("[Debug] Conversation being analyzed:", recentConversation);
+        console.log("[Debug] System prompt:", MASTER_SYSTEM_PROMPT);
+
         const masterResponse = await openai.chat.completions.create({
           model: MASTER_MODEL,
           messages: masterMessages,
           tools: openAITools,
-          tool_choice: "auto",
+          tool_choice: "auto", // Let the model decide when to use tools
         });
+
+        console.log(
+          "[Debug] Master AI response:",
+          JSON.stringify(masterResponse.choices[0].message, null, 2)
+        );
 
         const masterMessage = masterResponse.choices[0].message;
 
         if (masterMessage.tool_calls && masterMessage.tool_calls.length > 0) {
-          console.log("[Master AI] Tool calls detected");
+          console.log(
+            "[Master AI] Tool calls detected:",
+            masterMessage.tool_calls.length
+          );
           masterMessages.push(masterMessage);
+
+          // Execute all tool calls and collect interventions
+          const interventions: string[] = [];
 
           for (const toolCall of masterMessage.tool_calls) {
             const functionName = toolCall.function.name;
-            const functionArgs: DetectAnimalArgs = JSON.parse(
-              toolCall.function.arguments
+            const functionArgs = JSON.parse(toolCall.function.arguments);
+
+            console.log(
+              `[Master AI] Executing tool: ${functionName} with args:`,
+              functionArgs
             );
 
-            if (functionName === "detectAnimal") {
-              const toolResult = await detectAnimal(
+            if (toolFunctions[functionName]) {
+              const toolResult = await toolFunctions[functionName](
                 functionArgs,
-                masterAIContext,
+                masterContext,
                 sessionId
               );
+
+              console.log(
+                `[Master AI] Tool ${functionName} result:`,
+                toolResult
+              );
+
+              // Extract intervention from tool result
+              if (
+                toolResult.success &&
+                typeof toolResult.data?.intervention === "string"
+              ) {
+                interventions.push(toolResult.data.intervention);
+              }
+
               masterMessages.push({
                 role: "tool",
                 tool_call_id: toolCall.id,
                 content: JSON.stringify(toolResult.data || toolResult.error),
               });
+            } else {
+              console.error(`[Master AI] Unknown tool: ${functionName}`);
+              masterMessages.push({
+                role: "tool",
+                tool_call_id: toolCall.id,
+                content: JSON.stringify({
+                  error: `Unknown tool: ${functionName}`,
+                }),
+              });
             }
           }
 
-          const finalMasterResponse = await openai.chat.completions.create({
-            model: MASTER_MODEL,
-            messages: masterMessages,
-          });
+          // If we have interventions from tools, use them directly
+          if (interventions.length > 0) {
+            finalSystemInstruction = interventions.join("\n\n");
+            console.log(
+              `[Master AI] Using tool-generated interventions: ${finalSystemInstruction}`
+            );
+          } else {
+            // Get final response after tool execution for additional context
+            const finalMasterResponse = await openai.chat.completions.create({
+              model: MASTER_MODEL,
+              messages: [
+                ...masterMessages,
+                {
+                  role: "user",
+                  content:
+                    "Based on the tool results above, provide final intervention instructions for the interviewer AI. Be specific and actionable.",
+                },
+              ],
+            });
 
-          if (finalMasterResponse.choices[0].message.content) {
-            finalSystemInstruction =
-              finalMasterResponse.choices[0].message.content;
+            if (finalMasterResponse.choices[0].message.content) {
+              finalSystemInstruction =
+                finalMasterResponse.choices[0].message.content;
+            }
           }
         } else if (masterMessage.content) {
+          console.log("[Master AI] No tools called, using direct response");
           finalSystemInstruction = masterMessage.content;
         }
 
-        console.log(`[Master AI] Final decision: ${finalSystemInstruction}`);
-        updateMasterAIContext(sessionId, {
+        console.log(
+          `[Master AI] Final intervention instruction: ${finalSystemInstruction}`
+        );
+
+        updateMasterContext(sessionId, {
           masterAISystemMessage: finalSystemInstruction,
         });
 
         return NextResponse.json({
-          masterAISystemMessage: finalSystemInstruction, // Return the final instruction
+          masterAISystemMessage: finalSystemInstruction,
           sessionId: sessionId,
         });
       } catch (error) {
         console.error("Error processing conversation batch:", error);
-        updateMasterAIContext(sessionId, {
+        updateMasterContext(sessionId, {
           masterAISystemMessage: `Error processing conversation: ${
             (error as Error).message
           }`,
         });
+
         return NextResponse.json(
           { error: "Failed to process conversation batch." },
           { status: 500 }

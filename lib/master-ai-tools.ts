@@ -3,18 +3,19 @@ import type {
   ToolFunctionResponsePayload,
   MasterAIToolContext,
   DetectAnimalArgs,
-} from "@/lib/interview"; // Corrected path
+} from "@/lib/interview";
 
-// In-memory store for this example. Simplified for the new context.
-const interviewSessionStore: { [sessionId: string]: MasterAIToolContext } = {};
+// In-memory store - replace with database in production
+const sessionStore: { [sessionId: string]: MasterAIToolContext } = {};
 
+// Generic session management
 function getSessionContext(sessionId: string): MasterAIToolContext {
-  if (!interviewSessionStore[sessionId]) {
-    interviewSessionStore[sessionId] = {
+  if (!sessionStore[sessionId]) {
+    sessionStore[sessionId] = {
       conversationHistory: [],
     };
   }
-  return interviewSessionStore[sessionId];
+  return sessionStore[sessionId];
 }
 
 function updateSessionContext(
@@ -22,40 +23,112 @@ function updateSessionContext(
   updates: Partial<MasterAIToolContext>
 ): void {
   const context = getSessionContext(sessionId);
-  interviewSessionStore[sessionId] = { ...context, ...updates };
+  sessionStore[sessionId] = { ...context, ...updates };
 }
 
-export const detectAnimal: (
-  args: DetectAnimalArgs,
+// TOOL FUNCTIONS - Add new tools here
+export type ToolFunction = (
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  args: any,
   context: MasterAIToolContext,
   sessionId: string
-) => Promise<ToolFunctionResponsePayload> = async (
-  args,
-  context,
-  sessionId
-) => {
-  console.log(`[MasterTool:detectAnimal] Args from Orchestrator AI:`, args);
-  console.log(`[MasterTool:detectAnimal] Current context:`, context);
+) => Promise<ToolFunctionResponsePayload>;
 
-  // In a real application, you would implement the animal detection logic here.
-  // For this simulation, we trust the Orchestrator AI's detection.
-  const detectedAnimal = args.animal;
+export const toolFunctions: { [key: string]: ToolFunction } = {
+  detectAnimalssss: async (
+    args: DetectAnimalArgs,
+    context: MasterAIToolContext
+    // sessionId: string
+  ): Promise<ToolFunctionResponsePayload> => {
+    console.log(`[Tool:detectAnimal] Args:`, args);
+    console.log(`[Tool:detectAnimal] Context:`, context);
 
-  updateSessionContext(sessionId, {
-    masterAISystemMessage: `Detected animal: ${detectedAnimal}.`,
-  });
+    const detectedAnimal = args.animal;
 
-  return {
-    success: true,
-    data: { animal: detectedAnimal },
-  };
+    // Create the intervention instruction
+    const interventionInstruction = `INTERVENTION REQUIRED: Animal detected (${detectedAnimal}). 
+    
+IMMEDIATELY redirect the conversation by asking about cars, vehicles, or transportation. 
+Examples:
+- "That's interesting! Speaking of getting around, what kind of car do you drive?"
+- "By the way, I'm curious about your transportation preferences. Do you prefer cars, public transit, or other vehicles?"
+- "Let's talk about something different - what's your dream car?"
+
+Do NOT continue discussing animals. Smoothly transition to vehicle/transportation topics.`;
+
+    return {
+      success: true,
+      data: {
+        animal: detectedAnimal,
+        intervention: interventionInstruction,
+        action: "redirect_to_cars",
+      },
+    };
+  },
+
+  // Example of additional tools you can add:
+
+  //   detectEmotion: async (
+  //     args: any,
+  //     context: MasterAIToolContext,
+  //     sessionId: string
+  //   ) => {
+  //     console.log(`[Tool:detectEmotion] Args:`, args);
+
+  //     const interventionInstruction = `EMOTION DETECTED: ${args.emotion} (intensity: ${args.intensity}/10).
+
+  // ADJUST your approach:
+  // - If intensity > 7: Be more supportive and empathetic
+  // - If negative emotion: Acknowledge their feelings before continuing
+  // - If positive emotion: Match their energy level appropriately`;
+
+  //     return {
+  //       success: true,
+  //       data: {
+  //         emotion: args.emotion,
+  //         intensity: args.intensity,
+  //         intervention: interventionInstruction,
+  //         action: "adjust_tone",
+  //       },
+  //     };
+  //   },
+
+  //   detectTechnicalTerms: async (
+  //     args: any,
+  //     context: MasterAIToolContext,
+  //     sessionId: string
+  //   ) => {
+  //     console.log(`[Tool:detectTechnicalTerms] Args:`, args);
+
+  //     const interventionInstruction = `TECHNICAL EXPERTISE DETECTED: ${
+  //       args.category
+  //     } terms used (${args.terms.join(", ")}).
+
+  // FOLLOW UP with deeper technical questions:
+  // - Ask about specific experience with these technologies
+  // - Probe for practical applications they've worked on
+  // - Assess depth of knowledge vs. surface-level familiarity`;
+
+  //     return {
+  //       success: true,
+  //       data: {
+  //         terms: args.terms,
+  //         category: args.category,
+  //         intervention: interventionInstruction,
+  //         action: "probe_technical_depth",
+  //       },
+  //     };
+  //   },
 };
 
-export function getMasterAIContext(sessionId: string): MasterAIToolContext {
-  return getSessionContext(sessionId);
+// Generic context management functions
+export function getMasterContext(
+  sessionId: string
+): MasterAIToolContext | null {
+  return sessionStore[sessionId] || null;
 }
 
-export function updateMasterAIContext(
+export function updateMasterContext(
   sessionId: string,
   updates: Partial<MasterAIToolContext>
 ): void {
@@ -66,6 +139,6 @@ export function initializeSession(sessionId: string): MasterAIToolContext {
   const newContext: MasterAIToolContext = {
     conversationHistory: [],
   };
-  interviewSessionStore[sessionId] = newContext;
+  sessionStore[sessionId] = newContext;
   return newContext;
 }
