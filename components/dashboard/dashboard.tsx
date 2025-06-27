@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useEffect, useRef } from "react";
+import React, { useState, useEffect, useRef, useCallback } from "react";
 import { Brain } from "lucide-react";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import type {
@@ -22,7 +22,7 @@ import TranscriptSection from "./transcript-section";
 import ControlPanel from "./control-panel";
 import Header from "./header";
 import { ServerEvent } from "@/types/tools";
-
+import ToolToggle from "./tool-toggle";
 // --- Interview Store ---
 const useInterviewStore = () => {
   const [isActive, setIsActive] = useState<boolean>(false);
@@ -73,6 +73,9 @@ const InterviewDashboard: React.FC = () => {
   const [connectionState, setConnectionState] =
     useState<RTCConnectionState>("disconnected");
   const [rtcSessionId, setRtcSessionId] = useState<string | null>(null);
+  const [enabledTools, setEnabledTools] = useState<string[]>([
+    "detectAnimalssss",
+  ]);
 
   const pcRef = useRef<RTCPeerConnection | null>(null);
   const dcRef = useRef<RTCDataChannel | null>(null);
@@ -88,7 +91,40 @@ const InterviewDashboard: React.FC = () => {
   const BUFFER_TIMEOUT = 5000;
   // const isAudioPlaybackEnabled = true;
 
-  // --- Core Functions (No useCallback) ---
+  const handleToolConfigChange = useCallback(
+    async (newEnabledTools: string[]) => {
+      // Prevent unnecessary updates if tools haven't actually changed
+      if (
+        JSON.stringify(newEnabledTools.sort()) ===
+        JSON.stringify(enabledTools.sort())
+      ) {
+        return;
+      }
+
+      setEnabledTools(newEnabledTools);
+
+      // Send to backend
+      try {
+        const response = await fetch("/api/interview-event", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            sessionId: rtcSessionId || `config-${crypto.randomUUID()}`,
+            enabledTools: newEnabledTools,
+            type: "update_tools",
+          }),
+        });
+
+        if (response.ok) {
+          const data = await response.json();
+          console.log("Tools updated:", data);
+        }
+      } catch (error) {
+        console.error("Error updating tools:", error);
+      }
+    },
+    [enabledTools, rtcSessionId]
+  ); // Dependencies for useCallback
 
   const logClientEvent = (data: unknown, eventName: string) => {
     console.log(`[CLIENT EVENT: ${eventName}]`, data);
@@ -404,6 +440,8 @@ const InterviewDashboard: React.FC = () => {
               <AlertDescription>{masterAIResponse}</AlertDescription>
             </Alert>
           )}
+          <ToolToggle onToolConfigChange={handleToolConfigChange} />
+
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
             <TranscriptSection store={store} />
             <ActivityLog store={store} />
